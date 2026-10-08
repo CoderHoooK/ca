@@ -1,0 +1,191 @@
+# LanVideoSync
+
+局域网同步播放。教师机一个操作，全班学生机同一时刻一起播、一起停、一起跳。
+
+**视频文件不过网。** 视频提前拷到每台机器本地，网上只跑控制指令（几百字节），
+所以几百 MB 的 4K 片源也不会卡，学生机不需要显卡、不需要服务器。
+
+---
+
+## 怎么跑（开发时）
+
+```
+pip install PySide6 websockets
+
+# 教师端（带界面）
+python src/teacher/main.py
+
+# 学生端（每台学生机跑一个）
+python src/student/main.py
+```
+
+学生机需要 **mpv**：把 Windows 便携版解压后的 `mpv.exe` 及其 DLL 放到项目的
+`mpv\` 目录下（即 `mpv\mpv.exe`）。下载地址 <https://mpv.io/installation/>，
+选 `mpv-x86_64-*.7z`。
+
+---
+
+## 怎么打包成 exe
+
+```
+pip install pyinstaller
+python build.py
+```
+
+产物是 `dist\` 下的两个文件夹：
+
+```
+dist\Teacher\     Teacher.exe + mpv\ + 使用说明.txt   → 老师这台机器
+dist\Student\     Student.exe + mpv\ + 使用说明.txt   → 每台学生机
+```
+
+**是 onedir（文件夹）不是单文件 exe**，整个文件夹拷过去就行，不需要装 Python、
+不需要装 mpv。别只拷 exe —— 它旁边的 `_internal\` 和 `mpv\` 都是必需的。
+
+只要打其中一个：`python build.py teacher` 或 `python build.py student`。
+
+---
+
+## 使用前的准备
+
+1. **把视频和同名字幕拷到每台学生机的桌面。**
+   学生端只扫桌面（`桌面\*.mkv`、`*.mp4` 等），别的目录不看。支持
+   mkv / mp4 / avi / mov / wmv / flv / webm / m4v / ts，要加减就改
+   `src/common/config.py` 里的 `VIDEO_EXTS`（学生端扫描和教师端文件选择框
+   都跟着它走）。字幕要叫 `影片名.ass` 和视频同名放在一起，会被自动加载；
+   没有字幕也能正常播。
+2. 教师机和学生机在同一个局域网里（同一网段，别跨 VLAN）。
+3. 教师端如果弹防火墙提示，要允许「专用网络」访问。
+
+## 上课怎么用
+
+1. 教师机双击 `Teacher.exe`。
+2. 点 **选择视频** 选视频。状态栏会提示有没有找到同名字幕。
+3. 学生机双击 `Student.exe`，什么都不用点。教师端界面上的
+   **已连接学生机** 数字会涨上来 —— 这就是「学生机都就绪了」。
+4. 点 **▶ 同步播放**。倒计时 3 秒后全班一起开始（这 3 秒是留给学生机加载视频的）。
+5. **⏸ 暂停** / **⏵ 继续** / **⏹ 停止**，拖进度条，全班跟着走。
+
+学生端不需要任何操作。教师端重启、网线掉了，学生端会自己重连。
+
+---
+
+## 验收用的测试视频
+
+`测试视频\同步测试.mkv`（3 MB，90 秒，1280x720）是给你**验收同步**用的，不是教学片。
+
+画面上左上角有个**毫秒级计时的白色数字**，另外每秒响一声提示音。把两台学生机
+摆在一起点播放：
+
+- 两边的数字一致 → 同步；
+- 数字差了一秒以上 → 没同步，去看日志。
+
+那个数字是**直接烧进视频画面里**的，不是播放器叠加的字幕，所以哪怕字幕没加载
+出来它也一定在。背景里 `testsrc` 自带的计数器是第二重参照。
+
+正式上课前，建议先把 `同步测试.mkv` 拷到每台学生机桌面，代替真片源把整套流程
+走一遍（选片 → 播放 → 暂停 → 继续 → 拖进度条），确认没问题再换成真教学片。
+
+想换个长度就重新生成一条（前提是 `mpv\mpv.exe` 在项目根目录下）：
+
+```bash
+cp /c/Windows/Fonts/consola.ttf ./_font.ttf   # 字体得放当前目录：路径里不能有盘符冒号
+./mpv/mpv.exe "av://lavfi:testsrc=duration=90:size=1280x720:rate=30,drawtext=fontfile=_font.ttf:text='%{pts}':fontsize=110:fontcolor=white:box=1:boxcolor=black@0.6:boxborderw=24:x=30:y=30" \
+  -o 同步测试.mkv --of=matroska \
+  --audio-file="av://lavfi:sine=frequency=440:beep_factor=4:duration=90"
+```
+
+两个坑：`fontfile` 的路径里**不能出现冒号**（`C:` 里的 `:` 会被 lavfi 当成选项
+分隔符，报 `No option name near ...`）；`%{pts:hms}` 这类带冒号的写法同样不行，
+所以这里用的是不带参数的 `%{pts}`（在 lavfi 里就是帧号/时间戳，秒为单位）。
+生成完记得把临时拷来的 `_font.ttf` 删掉。
+
+---
+
+## 它是怎么做到同步的
+
+三件事，都不复杂：
+
+**1. 起播用「未来时间点」。**
+教师端点播放时不是立刻播，而是广播一个 **3 秒后**的时间点 `start_at`。
+每台学生机拿到后先把 mpv 用暂停态加载好、定位好，然后睡到 `start_at` 才
+`play()`。绝对不能收到消息就立刻播 —— 那样 38 台机器各播各的。
+教师机自己也遵守同一个 `start_at`，所以老师屏幕上看到的画面就是学生该看到的画面。
+
+**2. 教师端每秒心跳一次，学生端自己纠偏。**
+心跳里带着「我在 server_time 时刻位于 position 秒」。学生端换算成此刻应该
+在的位置，偏差超过 **0.5 秒**才 seek。低于阈值不动 —— 频繁 seek 会让画面
+一直抽搐，比轻微不同步更难看。
+
+这一个机制同时解决了三件事：自动纠偏、状态一致、以及某台机器加载慢错过
+起播时刻的补救。
+
+**3. 时钟对齐用 NTP 那套。**
+学生端连上后发几个 PING/PONG 算出和教师端的时钟偏差（取往返最快的那次采样），
+之后所有时间都换算到教师时钟再比。不这么做的话，各机器系统时间差几秒就全乱了。
+
+---
+
+## 代码结构
+
+```
+src/
+  common/
+    config.py     所有可调参数（端口、提前量、纠偏阈值…）都在这
+    mpvctl.py     mpv IPC 封装，教师端学生端共用
+    net.py        UDP 广播发现 + WebSocket 地址探测
+    timesync.py   PING/PONG 时钟同步
+    protocol.py   消息编解码
+    paths.py      exe 目录 / mpv.exe / 桌面 的定位（打包后路径会变，都收在这）
+    log.py        同时写 stdout 和 exe 旁边的 .log 文件
+  teacher/main.py 教师端：Qt 界面 + WebSocket 服务端 + 心跳
+  student/main.py 学生端：自动发现、连接、执行指令、纠偏
+tests/            见下
+build.py          打包脚本
+```
+
+## 测试
+
+```
+python tests/test_mpv_ipc.py        # mpv IPC 封装，跑在假 mpv 上（14 项，秒级）
+python tests/live_mpv.py            # 真 mpv 端到端，mkv + mp4 各一遍（29 项，弹 mpv 窗口）
+python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫描（19 项）
+python tests/test_integration.py    # 1 教师 + 3 学生同机集成（17 项，弹 5 个窗口）
+```
+
+`test_integration.py` 用的是真的教师端界面类和真的学生端，视频、mpv、
+WebSocket、UDP 发现全走真实路径，是最接近实机的一次验证。它把学生端扫桌面
+的目录改指向 `tests/media`，不会往你桌面上放东西。想验 mp4 那条路，加个参数：
+
+```
+python tests/test_integration.py movie.mp4
+```
+
+---
+
+## 如果第一次点播放时全班明显晚起播
+
+第一次运行 mpv.exe 时，Windows Defender 要扫一遍那个 115 MB 的 exe，可能要几秒，
+学生端就赶不上 `start_at`。心跳会在 1 秒内把它 seek 回正确位置，所以只是一次
+轻微的跳帧，不影响使用。
+
+想做得更稳，两个办法：
+
+- 提前在有 mpv 的机器上双击一次 `mpv\mpv.exe`，让杀毒软件先扫完再上课；
+- 把 `src/common/config.py` 里的 `PLAY_LEAD` 从 `3.0` 调大到 `5.0`，
+  代价是老师点完要多等两秒才开始（改完要重新打包）。
+
+## 已知的坑（改代码前先看这两条）
+
+**mpv IPC 不能用阻塞读。** Windows 的同步命名管道句柄同一时刻只允许一个
+未完成的 I/O：读线程一旦阻塞在 `ReadFile` 上，别的线程的 `WriteFile` 就永远
+排不上队，程序无声卡死（表现是「点了没反应、CPU 占用 0」）。所以
+`mpvctl.py` 的读线程用 `PeekNamedPipe` 轮询，确认有数据才读。
+详见 `mpvctl.py` 文件开头的说明。
+
+**定位不要用 mpv 的 `--start=`。** 实测 25 次里有 10 次，mpv 会把起始定位
+拖到加载之后懒执行，这期间 `set_property pause false` 虽然立刻返回 success，
+却要等 1~2 秒才真正生效，全班起播时间就散了。正确做法是显式 `seek` 并等位置
+落定（`MPV._seek_and_settle`），`start()` 返回即代表「已加载 + 已定位 + 已停稳」。
+#   c a  
+ 
