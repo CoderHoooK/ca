@@ -1,0 +1,7 @@
+# 运行
+# websockets 必须 >= 15：用到了 websockets.asyncio 和 connect(proxy=None)
+websockets>=15
+PySide6>=6.5
+
+# 打包（只有 python build.py 需要）
+pyinstaller

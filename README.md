@@ -10,7 +10,7 @@
 ## 怎么跑（开发时）
 
 ```
-pip install PySide6 websockets
+python -m pip install -r requirements.txt
 
 # 教师端（带界面）
 python src/teacher/main.py
@@ -31,7 +31,7 @@ python src/student/main.py --silent
 ## 怎么打包成 exe
 
 ```
-pip install pyinstaller
+python -m pip install -r requirements.txt   # 已包含 pyinstaller
 python build.py
 ```
 
