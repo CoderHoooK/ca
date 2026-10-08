@@ -1,0 +1,17 @@
+# 打包产物（build.py 生成）
+build/
+dist/
+dist_mpv.zip
+
+# 第三方 mpv 二进制（146MB，不入库）
+mpv/
+
+# Python 缓存
+__pycache__/
+*.py[cod]
+
+# 日志
+*.log
+
+# 本地设置
+.claude/settings.local.json
