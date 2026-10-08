@@ -38,6 +38,7 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 from websockets.asyncio.server import serve
+from websockets.exceptions import ConnectionClosed
 
 from common import config, net, protocol
 from common.log import log
@@ -87,12 +88,15 @@ class Server(threading.Thread):
     async def _serve(self) -> None:
         await net.start_responder()
         # ping_interval 保持默认：心跳只证明教师端还活着，断了不容易发现
-        async with serve(self._handle, "0.0.0.0", config.WS_PORT) as server:
+        async with serve(self._on_connect, "0.0.0.0", config.WS_PORT) as server:
             self.ready.set()
             log(f"教师端就绪 ws://0.0.0.0:{config.WS_PORT}，UDP 发现端口 {config.DISCOVERY_PORT}")
             await server.serve_forever()
 
-    async def _handle(self, ws) -> None:
+    # 不能叫 _handle：Python 3.13 起 threading.Thread 内部有个同名属性
+    # （_ThreadHandle），会把这个方法盖掉，结果所有学生连接都报
+    # "'_thread._ThreadHandle' object is not callable"。
+    async def _on_connect(self, ws) -> None:
         peer = ws.remote_address[0] if ws.remote_address else "?"
         with self._lock:
             self._clients.add(ws)
@@ -113,12 +117,18 @@ class Server(threading.Thread):
                                 "cmd": protocol.PONG,
                                 "t0": message.get("t0"),
                                 "t_teacher": time.time(),
+                                "name": net.machine_name(),
+                                "id": net.INSTANCE_ID,
                             }
                         )
                     )
                     continue
 
                 self._on_message(message, peer)
+        except ConnectionClosed:
+            # 学生机断网、关机、切换教师机都会走到这里，属于正常现象，
+            # 别让 websockets 打一串「connection handler failed」堆栈吓到人
+            pass
         finally:
             with self._lock:
                 self._clients.discard(ws)

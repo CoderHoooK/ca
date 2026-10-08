@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import sys
+from collections import deque
 from datetime import datetime
 from pathlib import Path
 
@@ -14,6 +15,10 @@ from .paths import app_dir
 
 MAX_LOG_BYTES = 2 * 1024 * 1024
 _checked = False
+
+# 最近的日志行，界面（学生端的「日志」面板）从这里读，不用去解析日志文件。
+# deque 的 append 是线程安全的，日志可以从任何线程写。
+RECENT: deque[str] = deque(maxlen=300)
 
 
 def _log_path() -> Path:
@@ -39,6 +44,7 @@ def _rotate_once(path: Path) -> None:
 
 def log(message: str) -> None:
     line = f"[{datetime.now():%Y-%m-%d %H:%M:%S}] {message}"
+    RECENT.append(line)
 
     # 打包成 --noconsole 时 sys.stdout 是 None，print 会直接抛异常
     if sys.stdout is not None:

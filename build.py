@@ -6,7 +6,7 @@
 
 产物：
     dist/Teacher/Teacher.exe    教师端（带界面，老师用）
-    dist/Student/Student.exe    学生端（无界面，学生用）
+    dist/Student/Student.exe    学生端（带状态窗口，加 --silent 则无界面）
     两个目录里都放好了 mpv\\mpv.exe，拷到别人机器上不用再装任何东西。
 
 为什么是 onedir 不是 onefile：onefile 每次启动都要把上百 MB 解压到临时目录，
@@ -27,7 +27,7 @@ MPV_SRC = ROOT / "mpv"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
 
-# 学生端也不带控制台：学生不该看到黑框，出问题看 Student.log。
+# 两个都不带控制台：学生不该看到黑框，出问题看 Student.log 或学生端界面里的「运行日志」。
 # 想让它显示控制台方便排查，把下面这行改成 False 重打即可。
 NOCONSOLE = True
 
@@ -60,6 +60,18 @@ USAGE = """LanVideoSync —— 局域网同步播放
     双击就行，什么都不用点。
     它会自己搜教师机，连上后跟着教师端播。
     教师端重启、网线掉了，它都会自己重连。
+
+    窗口里能看到：连没连上教师机、延迟、在播哪个视频、播到哪儿。
+    点窗口右上角的 × 只是缩到右下角托盘，同步不会停；
+    要真正退出，右键托盘图标选「退出」。
+
+    一直连不上怎么办（窗口里的「连接设置」，连续失败后会自动展开）：
+      1. 点「扫描教师机」，列表里双击教师机就连
+      2. 扫不到就手动输入教师机的 IP（教师端窗口顶部显示着）
+      3. 想回到全自动，点「恢复自动搜索」
+
+    不想要窗口（比如开机自启的机房机器），用 --silent 启动：
+      Student.exe --silent
 
 前提条件
     · 视频文件和同名字幕要提前拷到**每台学生机的桌面**上
@@ -94,11 +106,10 @@ def build_one(target: str) -> Path:
     ]
     if NOCONSOLE:
         cmd.append("--noconsole")
-    # 学生端用不到 Qt，明确排掉，能省一百多 MB
-    if target == "student":
-        cmd += ["--exclude-module", "PySide6", "--exclude-module", "tkinter"]
-    if target == "teacher":
-        cmd += ["--exclude-module", "tkinter"]
+    # 学生端现在也有界面（PySide6），两边都要带 Qt。
+    # websockets.sync.client 是扫描教师机时在函数里才 import 的，
+    # 显式声明一下，免得哪个版本的 PyInstaller 漏掉它。
+    cmd += ["--exclude-module", "tkinter", "--hidden-import", "websockets.sync.client"]
 
     cmd.append(str(info["entry"]))
     subprocess.run(cmd, check=True, cwd=ROOT)

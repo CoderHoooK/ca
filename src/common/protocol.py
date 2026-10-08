@@ -17,7 +17,7 @@ SEEK = "SEEK"            # {position, start_at, resume}
 STOP = "STOP"            # {}                        状态切换，不需要时间戳
 HEARTBEAT = "HEARTBEAT"  # {playing, position, server_time}
 PING = "PING"            # {t0}
-PONG = "PONG"            # {t0, t_teacher}
+PONG = "PONG"            # {t0, t_teacher, name, id}  name/id 是教师机的主机名和实例标识，可缺省
 
 # ---- 学生端 → 教师端 ----
 

@@ -15,8 +15,11 @@ pip install PySide6 websockets
 # 教师端（带界面）
 python src/teacher/main.py
 
-# 学生端（每台学生机跑一个）
+# 学生端（每台学生机跑一个，带状态窗口）
 python src/student/main.py
+
+# 学生端，不要窗口（后台跑）
+python src/student/main.py --silent
 ```
 
 学生机需要 **mpv**：把 Windows 便携版解压后的 `mpv.exe` 及其 DLL 放到项目的
@@ -36,7 +39,7 @@ python build.py
 
 ```
 dist\Teacher\     Teacher.exe + mpv\ + 使用说明.txt   → 老师这台机器
-dist\Student\     Student.exe + mpv\ + 使用说明.txt   → 每台学生机
+dist\Student\     Student.exe + mpv\ + 使用说明.txt   → 每台学生机（带状态窗口）
 ```
 
 **是 onedir（文件夹）不是单文件 exe**，整个文件夹拷过去就行，不需要装 Python、
@@ -67,6 +70,48 @@ dist\Student\     Student.exe + mpv\ + 使用说明.txt   → 每台学生机
 5. **⏸ 暂停** / **⏵ 继续** / **⏹ 停止**，拖进度条，全班跟着走。
 
 学生端不需要任何操作。教师端重启、网线掉了，学生端会自己重连。
+
+---
+
+## 学生端界面
+
+学生端有一个小状态窗口，**只看不用点**：
+
+- 顶部横幅：绿色「已连接教师端」/ 黄色「正在搜索…」/ 红色「连接已断开，正在重连…」
+- 教师机名称和 IP、网络延迟、时钟偏差
+- 当前视频（有没有字幕）、播放状态（待机 / 加载中 / 等待统一开始 / 播放中 / 已暂停 /
+  桌面上没找到视频）、播放进度
+- 桌面上识别到几个视频；没找到 `mpv.exe` 会用红字警告
+- 「运行日志」折叠面板：现场排查时不用去翻 `Student.log`
+
+窗口右上角的 × **只是缩到系统托盘**，同步不会停（防止学生误点关掉）。要退出：
+右键托盘图标 →「退出」。系统没有托盘时，× 就是正常退出。
+
+加 `--silent`（或 `--nogui`）启动则完全没有界面，行为和以前一样。
+
+### 连不上教师机时
+
+连续失败 2 次后「连接设置」面板会自动展开：
+
+1. **扫描教师机**：列出局域网里所有教师机（名称 + IP），双击或点「连接选中」就连。
+   隔壁机房在同一个网段、有两台教师机时，靠名称区分。
+2. **手动输入 IP**：扫不到时的最后手段，`192.168.1.10` 或 `192.168.1.10:8765` 都行。
+   教师端窗口顶部显示着它的 IP。
+3. **恢复自动搜索**：手动指定之后，断线只会重连指定的那台，直到点这个按钮。
+
+扫描分两档（`net.scan`）：
+
+| | 做什么 | 什么时候用 |
+|---|---|---|
+| 普通 | 只发 UDP 广播 | 平时的自动搜索，很快 |
+| 深度 | 广播 + 给本网段每个地址单播探测 + 并发探测每个地址的 WebSocket 端口并用 PING 验证 | 点「扫描教师机」时；自动搜索连续 3 轮没结果后也会自动做（≥30 秒才重复一次） |
+
+深度扫描专门对付「广播被交换机/AP 挡掉」「教师机防火墙只放行了 TCP」这两种情况。
+它只扫本机每块网卡所在的 /24 网段。想关掉自动深度扫描，把 `config.py` 里的
+`AUTO_DEEP_SCAN_AFTER` 设成 `0`。
+
+> 注意：深度扫描无法穿过 AP 隔离 / 跨 VLAN。那种情况是网络本身不通，
+> 得让网管放行，或者把两台机器接到同一个网段。
 
 ---
 
@@ -133,13 +178,17 @@ src/
   common/
     config.py     所有可调参数（端口、提前量、纠偏阈值…）都在这
     mpvctl.py     mpv IPC 封装，教师端学生端共用
-    net.py        UDP 广播发现 + WebSocket 地址探测
+    net.py        UDP 广播发现、教师机扫描（普通/深度）、WebSocket 探测
     timesync.py   PING/PONG 时钟同步
     protocol.py   消息编解码
     paths.py      exe 目录 / mpv.exe / 桌面 的定位（打包后路径会变，都收在这）
     log.py        同时写 stdout 和 exe 旁边的 .log 文件
   teacher/main.py 教师端：Qt 界面 + WebSocket 服务端 + 心跳
-  student/main.py 学生端：自动发现、连接、执行指令、纠偏
+  student/
+    main.py       学生端逻辑：自动发现、连接、执行指令、纠偏、手动指定教师机
+    state.py      学生端运行状态（逻辑层写，界面层读）
+    ui.py         学生端状态窗口（PySide6）
+    runner.py     把学生端的 asyncio 循环放到后台线程，给界面用
 tests/            见下
 build.py          打包脚本
 ```
@@ -150,6 +199,8 @@ build.py          打包脚本
 python tests/test_mpv_ipc.py        # mpv IPC 封装，跑在假 mpv 上（14 项，秒级）
 python tests/live_mpv.py            # 真 mpv 端到端，mkv + mp4 各一遍（29 项，弹 mpv 窗口）
 python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫描（19 项）
+python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
+python tests/test_student_ui.py     # 学生端窗口按钮接线（25 项，offscreen，不需要显示器）
 python tests/test_integration.py    # 1 教师 + 3 学生同机集成（17 项，弹 5 个窗口）
 ```
 
@@ -187,5 +238,3 @@ python tests/test_integration.py movie.mp4
 拖到加载之后懒执行，这期间 `set_property pause false` 虽然立刻返回 success，
 却要等 1~2 秒才真正生效，全班起播时间就散了。正确做法是显式 `seek` 并等位置
 落定（`MPV._seek_and_settle`），`start()` 返回即代表「已加载 + 已定位 + 已停稳」。
-#   c a  
- 

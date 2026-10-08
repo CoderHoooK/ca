@@ -32,9 +32,12 @@ SAMPLES = 5
 class ClockSync:
     """学生端本地时钟与教师端时钟的换算。"""
 
-    def __init__(self, offset: float = 0.0, rtt: float | None = None):
+    def __init__(
+        self, offset: float = 0.0, rtt: float | None = None, teacher_name: str = ""
+    ):
         self.offset = offset
         self.rtt = rtt
+        self.teacher_name = teacher_name  # PONG 里带的教师机主机名，界面上显示用
 
     def teacher_now(self) -> float:
         """教师端此刻的时刻。所有 start_at 判断都要用它，别用 time.time()。"""
@@ -49,6 +52,7 @@ async def sync(ws, samples: int = SAMPLES, timeout: float = 2.0) -> ClockSync:
     """
     best_rtt: float | None = None
     best_offset = 0.0
+    teacher_name = ""
 
     for _ in range(samples):
         t0 = time.time()
@@ -63,6 +67,7 @@ async def sync(ws, samples: int = SAMPLES, timeout: float = 2.0) -> ClockSync:
         if message.get("cmd") != protocol.PONG:
             continue  # 同步期间飘进来的 HEARTBEAT 之类，跳过
 
+        teacher_name = str(message.get("name", teacher_name))
         rtt = t1 - t0
         offset = float(message["t_teacher"]) - (t0 + t1) / 2.0
         if best_rtt is None or rtt < best_rtt:
@@ -71,4 +76,4 @@ async def sync(ws, samples: int = SAMPLES, timeout: float = 2.0) -> ClockSync:
     if best_rtt is None:
         raise RuntimeError("时间同步失败：教师端没有回 PONG")
 
-    return ClockSync(offset=best_offset, rtt=best_rtt)
+    return ClockSync(offset=best_offset, rtt=best_rtt, teacher_name=teacher_name)
