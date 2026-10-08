@@ -23,6 +23,8 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent
 SRC = ROOT / "src"
+sys.path.insert(0, str(SRC))
+from common import config  # noqa: E402
 MPV_SRC = ROOT / "mpv"
 DIST = ROOT / "dist"
 BUILD = ROOT / "build"
@@ -77,7 +79,7 @@ USAGE = """LanVideoSync —— 局域网同步播放
     · 视频文件和同名字幕要提前拷到**每台学生机的桌面**上
       （程序只扫桌面，别的目录不看）
     · 教师机和学生机在同一个局域网里
-
+{extra}
 出问题了看日志
     本目录下的 {logname}
 """
@@ -144,6 +146,23 @@ def copy_mpv(out: Path) -> None:
     print(f"  mpv 已放入 {dest}（{total / 1024 / 1024:.0f} MB）")
 
 
+TEACHER_EXTRA = """
+学生机桌面上没有视频时（可选）：播放切片课程
+    1. 在你自己的电脑上用 tools\\slice.py 把电影切片（需要 ffmpeg）
+    2. 把生成的课程文件夹整个拷到本目录下的「课程库」里
+    3. 教师端点「选择切片课程」→ 选课 → 同步播放
+    学生机桌面上有同名视频的照常用本地的，没有的会自动从教师机拉切片，
+    学生机之间也会互相传。详见项目 README 的「切片课程」一节。
+    防火墙：教师机和学生机都要允许入站（专用网络），不放行也能播，只是更慢。
+"""
+
+STUDENT_EXTRA = """
+桌面上没有视频时
+    教师端如果播放的是切片课程，学生端会自动从教师机和其他学生机拉切片来播，
+    不用做任何操作。缓存在 %LOCALAPPDATA%\\LanVideoSync\\cache，下次启动时清空。
+"""
+
+
 def write_usage(out: Path, target: str) -> None:
     info = TARGETS[target]
     title = "教师端（老师在这台机器上操作）" if target == "teacher" else "学生端（学生机上双击即可）"
@@ -151,7 +170,16 @@ def write_usage(out: Path, target: str) -> None:
         title=title,
         exe=f"{info['name']}.exe",
         logname=f"{info['name']}.log",
+        extra=TEACHER_EXTRA if target == "teacher" else STUDENT_EXTRA,
     )
+    if target == "teacher":
+        library = out / config.LIBRARY_DIRNAME
+        library.mkdir(exist_ok=True)
+        (library / "把课程文件夹放在这里.txt").write_text(
+            "tools\\slice.py 切好的课程文件夹，整个拷到这个目录里。\n"
+            "教师端点「选择切片课程」就能看到。\n",
+            encoding="utf-8-sig",
+        )
     (out / "使用说明.txt").write_text(text, encoding="utf-8-sig")
 
 

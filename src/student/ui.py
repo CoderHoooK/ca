@@ -183,6 +183,14 @@ class StudentWindow(QWidget):
         grid.addWidget(self._play_label, 1, 1)
         grid.addWidget(_key("进度"), 2, 0)
         grid.addWidget(self._pos_label, 2, 1)
+        # 只有靠切片播放时才显示：缓存了多少、从哪来的
+        self._cache_key = _key("缓存")
+        self._cache_label = QLabel("—")
+        self._cache_label.setWordWrap(True)
+        grid.addWidget(self._cache_key, 3, 0)
+        grid.addWidget(self._cache_label, 3, 1)
+        self._cache_key.setVisible(False)
+        self._cache_label.setVisible(False)
         grid.setColumnStretch(1, 1)
         root.addWidget(play_card)
 
@@ -384,12 +392,25 @@ class StudentWindow(QWidget):
         # mpv 自己退出了（学生关掉了播放窗口）：别还显示「播放中」
         if play in (st.PLAYING, st.PAUSED, st.WAITING) and not self.student.mpv.running:
             play = st.IDLE
-        self._play_label.setText(PLAY_TEXT.get(play, play))
+        text = PLAY_TEXT.get(play, play)
+        if s.stream and s.buffering and play == st.PLAYING:
+            text = "缓冲中，稍等…（缓冲完会自动追上老师）"
+        self._play_label.setText(text)
         self._play_label.setStyleSheet(
             f"color: {RED}; font-weight: bold;" if play in (st.NOT_FOUND, st.ERROR) else ""
         )
         showing = play in (st.PLAYING, st.PAUSED)
         self._pos_label.setText(format_time(s.teacher_position) if showing else "—")
+
+        streaming = bool(s.stream and s.stream_total)
+        self._cache_key.setVisible(streaming)
+        self._cache_label.setVisible(streaming)
+        if streaming:
+            pct = s.stream_have / s.stream_total
+            self._cache_label.setText(
+                f"已缓存 {s.stream_have}/{s.stream_total} 段（{pct:.0%}）　"
+                f"教师机 {s.from_teacher} 段 · 同学 {s.from_peers} 段"
+            )
 
     def _refresh_env(self, s) -> None:
         lines = []

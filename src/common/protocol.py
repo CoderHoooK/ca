@@ -10,7 +10,7 @@ import json
 
 # ---- 教师端 → 学生端 ----
 
-PLAY = "PLAY"            # {video, position, start_at}
+PLAY = "PLAY"            # {video, position, start_at, package?}  package={id,title,http_port}：切片课程
 PAUSE = "PAUSE"          # {}                        状态切换，不需要时间戳
 RESUME = "RESUME"        # {position, start_at}
 SEEK = "SEEK"            # {position, start_at, resume}
@@ -22,6 +22,13 @@ PONG = "PONG"            # {t0, t_teacher, name, id}  name/id 是教师机的主
 # ---- 学生端 → 教师端 ----
 
 VIDEO_NOT_FOUND = "VIDEO_NOT_FOUND"  # {video}
+PEER_HELLO = "PEER_HELLO"            # {http_port}        我能给别的学生机提供切片的端口
+HAVE = "HAVE"                        # {pkg, add:[idx..]} 我又缓存好了这几段
+SOURCES = "SOURCES"                  # {req, pkg, n:[idx..]}  这几段谁有？
+
+# ---- 教师端 → 学生端（切片传输的 tracker 应答）----
+
+SOURCES_REPLY = "SOURCES_REPLY"      # {req, pkg, sources:{"idx":["host:port",..]}}
 
 
 def encode(msg: dict) -> str:

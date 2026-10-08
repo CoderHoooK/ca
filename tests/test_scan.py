@@ -51,7 +51,7 @@ class FakeMPV:
         self.calls: list[str] = []
         self.position = None
 
-    def start(self, video, subtitle, position=0.0):
+    def start(self, video, subtitle, position=0.0, load_timeout=None, extra_args=None):
         self.calls.append(f"start:{Path(video).name}:{subtitle.name if subtitle else None}")
         self.running = True
 

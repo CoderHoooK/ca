@@ -1,0 +1,143 @@
+"""教师端「选择切片课程」+ 播放切片课程的测试。离屏 Qt，假 mpv，不需要 ffmpeg。
+
+    python tests/test_teacher_ui.py
+"""
+
+from __future__ import annotations
+
+import os
+import shutil
+import sys
+import tempfile
+import time
+from pathlib import Path
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "src"))
+sys.path.insert(0, str(ROOT / "tests"))
+
+from PySide6.QtWidgets import QApplication
+
+from common import config, protocol
+from teacher import main as teacher_main
+from teacher.library import LibraryDialog, describe
+from test_streaming import http, make_package
+
+APP = None
+PASSED: list[str] = []
+FAILED: list[str] = []
+
+
+def check(name: str, condition: bool, detail: str = "") -> None:
+    (PASSED if condition else FAILED).append(name)
+    print(f"  [{'ok' if condition else 'FAIL'}]   {name}" + (f"  {detail}" if detail else ""))
+
+
+class FakeMPV:
+    def __init__(self) -> None:
+        self.running = False
+        self.paused = True
+        self.calls: list[str] = []
+        self.started: dict = {}
+
+    def start(self, video, subtitle, position=0.0, load_timeout=None, extra_args=None):
+        self.started = {"video": str(video), "subtitle": subtitle, "extra": list(extra_args or [])}
+        self.running = True
+
+    def play(self): self.calls.append("play"); self.paused = False
+    def pause(self): self.calls.append("pause"); self.paused = True
+    def seek(self, position): self.calls.append("seek")
+    def stop(self): self.calls.append("stop"); self.running = False
+    def quit(self): self.running = False
+    def query_paused(self): return self.paused
+    def get_position(self): return 3.0
+    def get_duration(self): return 24.0
+
+
+def main() -> int:
+    global APP
+    APP = QApplication.instance() or QApplication([])
+    tmp = Path(tempfile.mkdtemp(prefix="lvs_tui_"))
+    try:
+        library = tmp / "课程库"
+        folder, manifest = make_package(library, "课A")
+        make_package(library, "课B")
+        (library / "垃圾文件夹").mkdir()
+
+        print("\n课程库对话框")
+        dlg = LibraryDialog(None, library)
+        check("列出 2 门课，跳过损坏/无关的文件夹", dlg._list.count() == 2, str(dlg._list.count()))
+        check("每门课显示标题、时长、段数、字幕", "课A" in describe(manifest) and "有字幕" in describe(manifest)
+              and "0:24" in describe(manifest), describe(manifest))
+        dlg._list.setCurrentRow(0)
+        dlg._accept()
+        check("选择后返回 (文件夹, manifest)", dlg.selected is not None and dlg.selected[1].title == "课A")
+
+        empty = LibraryDialog(None, tmp / "新的空课程库")
+        check("空课程库给出提示，并告诉老师往哪放", "空" in empty._hint.text() and "新的空课程库" in empty._hint.text())
+        check("空课程库时「选择」不可点", not empty._ok.isEnabled())
+        check("课程库目录不存在时自动建好", (tmp / "新的空课程库").is_dir())
+
+        print("\n播放切片课程")
+        window = teacher_main.Window()
+        window.mpv = FakeMPV()
+        sent: list[dict] = []
+        window.server.broadcast = sent.append  # type: ignore[method-assign]
+        try:
+            check("不选课程时不开切片服务（不多占端口）", window._http is None)
+            window.package = (folder, manifest)
+            window.video = None
+            t0 = time.time()
+            window._play()
+            check("切片服务按需启动", window._http is not None)
+            port = window._http.port
+            m = window.mpv.started
+            check("教师机的 mpv 通过本机切片服务播放", m.get("video") == f"http://127.0.0.1:{port}/play/{manifest.id}/index.m3u8", m.get("video", ""))
+            check("加载了字幕文件", m.get("subtitle") == folder / "subs" / "subtitle.ass")
+            check("带上限制预读的参数", all(a in m.get("extra", []) for a in config.MPV_STREAM_ARGS))
+            check("广播了一条 PLAY", len(sent) == 1 and sent[0]["cmd"] == protocol.PLAY)
+            msg = sent[0]
+            check("PLAY 带课程信息", msg["package"] == {"id": manifest.id, "title": "课A", "http_port": port}, str(msg.get("package")))
+            check("video 字段是原始文件名（学生桌面有同名就用本地的）", msg["video"] == manifest.source_name)
+            lead = msg["start_at"] - t0
+            check("起播提前量比本地播放长", config.STREAM_PLAY_LEAD - 1 < lead < config.STREAM_PLAY_LEAD + 3, f"{lead:.1f}s")
+            code, _ = http(f"http://127.0.0.1:{port}/p/{manifest.id}/manifest.json")
+            check("学生能从教师机的服务取到 manifest", code == 200)
+            code, body = http(f"http://127.0.0.1:{port}/p/{manifest.id}/seg_00000.ts")
+            check("学生能取到切片", code == 200 and len(body) > 0)
+
+            # 状态栏：学生机缓存进度
+            window.server._peers = {
+                "a": {"host": "1.1.1.1", "port": 1, "have": {manifest.id: set(range(6))}},
+                "b": {"host": "1.1.1.2", "port": 2, "have": {manifest.id: set(range(12))}},
+            }
+            window._tick()
+            text = window._status_label.text()
+            check("状态栏显示切片分发情况", "2 台" in text and "75%" in text, text)
+
+            # 换成普通视频后，不再走切片
+            sent.clear()
+            window.package = None
+            window.video = tmp / "普通.mkv"
+            window.video.write_bytes(b"x")
+            window._play()
+            check("普通视频走原来的流程（PLAY 里没有 package）", sent and "package" not in sent[-1], str(sent[-1:]))
+        finally:
+            window.mpv.running = False
+            if window._http:
+                window._http.stop()
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+
+    print("\n" + "=" * 60)
+    print(f"通过 {len(PASSED)}，失败 {len(FAILED)}")
+    for name in FAILED:
+        print(f"  失败: {name}")
+    return 1 if FAILED else 0
+
+
+if __name__ == "__main__":
+    code = main()
+    sys.stdout.flush()
+    os._exit(code)

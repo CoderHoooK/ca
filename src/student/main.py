@@ -22,7 +22,10 @@
 from __future__ import annotations
 
 import asyncio
+import itertools
+import os
 import sys
+import threading
 import traceback
 from pathlib import Path
 
@@ -34,13 +37,19 @@ from websockets.asyncio.client import connect
 from common import config, net, protocol, timesync
 from common.log import log
 from common.mpvctl import MPV, MPVError
-from common.paths import desktop_dir, find_mpv
+from common.paths import cache_root, desktop_dir, find_mpv
+from common.segserver import SegServer
 from student import state as st
+from student import streaming
 from student.state import StudentState
+from student.streaming import StreamSession
+
+_instance_counter = itertools.count(1)
 
 
 class Student:
-    def __init__(self) -> None:
+    def __init__(self, cache_dir: Path | None = None) -> None:
+        """cache_dir 给测试用；正常运行时 None，用默认缓存目录并清掉上次的旧缓存。"""
         self.mpv = MPV("student")
         self.clock = timesync.ClockSync()
         self.current_video: Path | None = None
@@ -55,6 +64,22 @@ class Student:
         self._loop: asyncio.AbstractEventLoop | None = None
         self._scan_lock: asyncio.Lock | None = None
         self._last_deep_scan = float("-inf")
+
+        # ---- 切片播放 ----
+        if cache_dir is None:
+            root = cache_root()
+            streaming.cleanup_cache(root)  # 「下次启动学生端时清理」
+            cache_dir = root
+        # 每个实例一个子目录：同一台机器上开多个学生端（开发测试）时不会共用缓存
+        self._cache_dir = Path(cache_dir) / f"{os.getpid()}-{next(_instance_counter)}"
+        self._streams: dict[str, StreamSession] = {}   # 课程 id → 会话（含已停止但仍可提供的）
+        self._stream: StreamSession | None = None      # 当前正在下载/播放的
+        self._seg_server: SegServer | None = None
+        self._ws = None                                # 当前连着的教师端 websocket
+        self._source_waiters: dict[int, dict] = {}
+        self._req_ids = itertools.count(1)
+        self._wait_lock = threading.Lock()
+        self._waiting_requests = 0
 
     # ------------------------------------------------------------- 本地视频
 
@@ -100,8 +125,11 @@ class Student:
             self._schedule_seek(message, resume=True)
         elif cmd == protocol.SEEK:
             self._schedule_seek(message, resume=bool(message.get("resume", True)))
+        elif cmd == protocol.SOURCES_REPLY:
+            self._on_sources_reply(message)
         elif cmd == protocol.STOP:
             self._cancel_pending()
+            self._stop_stream()
             self.current_video = None
             await asyncio.to_thread(self._safe, self.mpv.stop)
             self.state.play = st.IDLE
@@ -117,11 +145,18 @@ class Student:
         self.state.desktop_videos = len(videos)
         video = videos.get(name.lower())
 
+        package = message.get("package")
+        if video is None and isinstance(package, dict):
+            # 桌面上没有，但教师放的是切片课程：从教师机/同学那里拉切片来播
+            await self._on_play_stream(message, package)
+            return
+
         if video is None:
             # 找不到就报告，别弹错误框、别崩。教师端会显示有多少台没找到。
             log(f"桌面上找不到视频 {name!r}，回报 VIDEO_NOT_FOUND")
             self.current_video = None
             self._cancel_pending()
+            self._stop_stream()
             await asyncio.to_thread(self._safe, self.mpv.stop)
             self.state.play = st.NOT_FOUND
             self.state.video = name
@@ -131,9 +166,11 @@ class Student:
 
         subtitle = self.find_subtitle(video)
         log(f"播放 {video.name}（字幕：{subtitle.name if subtitle else '无'}）")
+        self._stop_stream()
         self.current_video = video
         self.state.video = video.name
         self.state.has_subtitle = subtitle is not None
+        self.state.stream = False
         self.state.play = st.LOADING
 
         self._cancel_pending()
@@ -179,6 +216,11 @@ class Student:
     async def _seek_and_start(self, position: float, start_at: float, resume: bool) -> None:
         try:
             await asyncio.to_thread(self._safe, self.mpv.pause)
+            if self._stream is not None:
+                # 切片模式：先把目标位置那一段拉到，再 seek。不然 mpv 会在新位置上
+                # 干等，这段时间里画面是黑的。等不到（网络差）也照样 seek，由缓冲兜底。
+                self._stream.set_focus_time(position, urgent=True)
+                await asyncio.to_thread(self._stream.wait_ready, position, 1, 30.0)
             await asyncio.to_thread(self.mpv.seek, position)
         except MPVError as exc:
             # 定位失败也**不能直接退出**：那样学生端会一直停在暂停态，
@@ -208,15 +250,23 @@ class Student:
         应该在 position + 已经过去的时间。偏差小于阈值就不动——
         频繁 seek 会让画面一直抽搐，比轻微不同步更难看。
         """
+        elapsed = self.clock.teacher_now() - float(message["server_time"])
+        target = float(message["position"]) + elapsed
+
+        # 切片模式：预缓存窗口跟着教师的位置走（暂停时也跟，位置不会动而已）
+        if self._stream is not None:
+            self._stream.set_focus_time(target)
+
         if self._pending_task is not None and not self._pending_task.done():
             return  # 正在执行 PLAY/SEEK 的等待，别和它抢 mpv
         if not self.mpv.running or self.mpv.query_paused():
             return
         if not message.get("playing"):
             return
-
-        elapsed = self.clock.teacher_now() - float(message["server_time"])
-        target = float(message["position"]) + elapsed
+        if self.state.buffering:
+            # mpv 正在等切片，位置不动是因为没货而不是掉队。这时 seek 只会让它
+            # 重新发请求、白白堆积；等货到了、画面动起来再纠偏。
+            return
 
         current = self.mpv.get_position()
         if current is None:
@@ -231,6 +281,182 @@ class Student:
             self.mpv.seek(target)
         except MPVError as exc:
             log(f"纠偏失败：{exc}")
+
+    # ------------------------------------------------------------ 切片播放
+
+    async def _on_play_stream(self, message: dict, package: dict) -> None:
+        title = str(package.get("title") or message.get("video", ""))
+        log(f"桌面上没有 {message.get('video')!r}，改为从教师机拉切片播放《{title}》")
+        self.current_video = None
+        self.state.video = title
+        self.state.has_subtitle = False
+        self.state.stream = True
+        self.state.play = st.LOADING
+        self.state.stream_have = self.state.from_teacher = self.state.from_peers = 0
+        self.state.stream_total = 0
+        self._cancel_pending()
+        self._pending_task = asyncio.create_task(
+            self._load_stream_and_start(
+                package, float(message.get("position", 0.0)), float(message["start_at"])
+            )
+        )
+
+    async def _load_stream_and_start(self, package: dict, position: float, start_at: float) -> None:
+        host = self.state.teacher_host
+        try:
+            manifest = await asyncio.to_thread(
+                streaming.fetch_manifest, host, int(package["http_port"]), str(package["id"])
+            )
+            session = self._open_stream(manifest, host, int(package["http_port"]))
+            session.set_focus_time(position, urgent=True)
+            await asyncio.to_thread(session.ensure_assets)
+            self.state.has_subtitle = session.subtitle_path() is not None
+
+            # 先等起播位置的那一段到手再叫 mpv 加载。不然 mpv 的加载会卡在
+            # 等第一个切片上，超过它自己的加载超时就报错退出了。
+            # mpv 加载时总要读第 0 段来探测流信息，从中途开始也一样，所以两段都等。
+            ready = await asyncio.to_thread(
+                session.wait_ready, 0.0, 1, config.PLAY_WAIT_TIMEOUT
+            )
+            if ready and position > 0:
+                session.set_focus_time(position, urgent=True)
+                ready = await asyncio.to_thread(
+                    session.wait_ready, position, 1, config.PLAY_WAIT_TIMEOUT
+                )
+            if not ready:
+                raise MPVError("等不到起播位置的切片（教师机和同学都没有给）")
+
+            extra: list[str] = list(config.MPV_STREAM_ARGS)
+            fonts = session.fonts_dir()
+            if fonts is not None:
+                extra.append("--sub-fonts-dir=" + str(fonts))
+            url = self._ensure_seg_server().play_url(manifest.id)
+            await asyncio.to_thread(
+                self.mpv.start, url, session.subtitle_path(), position, extra_args=extra
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log(f"切片播放启动失败：{exc}")
+            self.state.play = st.ERROR
+            return
+
+        self.state.play = st.WAITING
+        await self._sleep_until(start_at)
+        await asyncio.to_thread(self._safe, self.mpv.play)
+        self.state.play = st.PLAYING
+
+    def _open_stream(self, manifest, host: str, port: int) -> StreamSession:
+        """取得这门课的会话。同一门课已经有就复用（里面的缓存还在）。"""
+        self._ensure_seg_server()
+        old = self._stream
+        if old is not None and old.manifest.id != manifest.id:
+            old.stop()
+        session = self._streams.get(manifest.id)
+        if session is None:
+            session = StreamSession(
+                manifest, self._cache_dir, (host, port),
+                sources_fn=self.request_sources,
+                have_fn=self.notify_have,
+                on_buffering=self._on_buffering,
+                on_progress=self._on_stream_progress,
+            )
+            self._streams[manifest.id] = session
+        else:
+            session.teacher = (host, port)
+        self._stream = session
+        self.state.stream_total = session.total
+        self._on_stream_progress(session)
+        session.start()
+        # 缓存里已有的段（重播同一门课）也告诉 tracker，同学才能找我要
+        if session.have:
+            self.notify_have(manifest.id, *sorted(session.have))
+        return session
+
+    def _stop_stream(self) -> None:
+        """停止下载。已缓存的文件保留，仍然可以给同学提供。"""
+        session, self._stream = self._stream, None
+        if session is not None:
+            session.stop()
+        self.state.stream = False
+        self.state.buffering = False
+
+    def _ensure_seg_server(self) -> SegServer:
+        """第一次需要时才启动切片服务：不用切片的学生机不会多开一个监听端口，
+        也就不会因此触发防火墙弹窗。"""
+        if self._seg_server is None:
+            self._seg_server = SegServer(
+                self._streams.get,
+                max_uploads=config.PEER_MAX_UPLOADS,
+                on_wait=self._on_wait,
+            ).start()
+            self._send_peer_hello()
+        return self._seg_server
+
+    def _on_wait(self, waiting: bool) -> None:
+        """mpv 开始/结束等某个切片。可能同时有几个请求在等，所以要计数。"""
+        with self._wait_lock:
+            self._waiting_requests += 1 if waiting else -1
+            self.state.buffering = self._waiting_requests > 0
+
+    def _on_buffering(self, buffering: bool) -> None:
+        pass  # 缓冲状态由 SegServer 的 on_wait 统一维护，这里留给以后扩展
+
+    def _on_stream_progress(self, session: StreamSession) -> None:
+        if session is self._stream:
+            self.state.stream_have = session.cached
+            self.state.from_teacher = session.from_teacher
+            self.state.from_peers = session.from_peers
+
+    # ---- 和教师端 tracker 的通信（下载线程调用，所以都要转交给事件循环）----
+
+    def _send_threadsafe(self, message: dict) -> bool:
+        ws, loop = self._ws, self._loop
+        if ws is None or loop is None:
+            return False
+        try:
+            asyncio.run_coroutine_threadsafe(ws.send(protocol.encode(message)), loop)
+            return True
+        except RuntimeError:
+            return False
+
+    def _send_peer_hello(self) -> None:
+        if self._seg_server is not None:
+            self._send_threadsafe(
+                {"cmd": protocol.PEER_HELLO, "http_port": self._seg_server.port}
+            )
+
+    def notify_have(self, pkg_id: str, *indexes: int) -> None:
+        """告诉教师机：我又缓存好了这几段，别的同学可以来要。"""
+        self._send_threadsafe({"cmd": protocol.HAVE, "pkg": pkg_id, "add": list(indexes)})
+
+    def request_sources(self, pkg_id: str, n: int, timeout: float = 1.5) -> list[tuple[str, int]]:
+        """问 tracker：第 n 段哪些同学有？阻塞调用，在下载线程里用。"""
+        req = next(self._req_ids)
+        slot = {"event": threading.Event(), "sources": []}
+        self._source_waiters[req] = slot
+        try:
+            if not self._send_threadsafe(
+                {"cmd": protocol.SOURCES, "req": req, "pkg": pkg_id, "n": [n]}
+            ):
+                return []
+            slot["event"].wait(timeout)
+            return slot["sources"]
+        finally:
+            self._source_waiters.pop(req, None)
+
+    def _on_sources_reply(self, message: dict) -> None:
+        slot = self._source_waiters.get(message.get("req"))
+        if slot is None:
+            return
+        found: list[tuple[str, int]] = []
+        for entry in (message.get("sources") or {}).values():
+            for addr in entry:
+                host, _, port = str(addr).rpartition(":")
+                if host and port.isdigit():
+                    found.append((host, int(port)))
+        slot["sources"] = found
+        slot["event"].set()
 
     # ----------------------------------------------------------------- 杂项
 
@@ -384,6 +610,13 @@ class Student:
                 f"时钟偏差 {self.clock.offset:+.3f}s"
             )
 
+            # 重连后 tracker 的记录是空的：把我的切片服务端口和已缓存的段重新报上去
+            self._ws = ws
+            self._send_peer_hello()
+            for pkg_id, session in self._streams.items():
+                if session.have:
+                    self.notify_have(pkg_id, *sorted(session.have))
+
             try:
                 async for raw in ws:
                     try:
@@ -401,6 +634,8 @@ class Student:
                 # 教师端日志里就是一串堆栈。
                 await ws.close()
                 raise
+            finally:
+                self._ws = None
 
     async def run_forever(self) -> None:
         """找教师端 → 连上 → 执行指令，断了就回到第一步，永不退出。"""
@@ -414,6 +649,10 @@ class Student:
             # 退出（Ctrl+C / 关窗口）时别留下孤儿 mpv 窗口
             self._cancel_pending()
             self.mpv.quit()
+            for session in self._streams.values():
+                session.stop()
+            if self._seg_server is not None:
+                self._seg_server.stop()
 
     async def _run_loop(self) -> None:
         assert self._wake is not None

@@ -73,6 +73,79 @@ dist\Student\     Student.exe + mpv\ + 使用说明.txt   → 每台学生机（
 
 ---
 
+## 学生机没有视频文件时：切片课程（可选）
+
+默认流程不变：视频拷到学生机桌面，局域网只传控制指令。**如果某台学生机桌面上
+没有这个视频**，现在可以让它从教师机拉视频来播 —— 前提是视频事先被切成了小片
+（HLS 风格）。学生桌面上有同名视频时**仍然优先用本地的**，完全不走网络。
+
+### 1. 在你自己的电脑上切片（不是教师端的功能）
+
+需要 [ffmpeg](https://ffmpeg.org/)（含 ffprobe）。不重新编码，一部电影几秒到
+几十秒：
+
+```
+python tools/slice.py 电影.mkv                       # 输出到 课程库\电影\
+python tools/slice.py 电影.mkv --sub 电影.ass        # 指定字幕
+python tools/slice.py 电影.mkv --segment-seconds 6   # 每段更短，缓冲更快
+python tools/slice.py --verify 课程库\电影            # 校验
+```
+
+输出的文件夹长这样：
+
+```
+电影/
+  manifest.json        每段的时长、大小、sha256
+  seg_00000.ts ...     视频+音频切片
+  subs/subtitle.ass    字幕（单独存。优先 --sub，其次同名 .ass，最后 mkv 内封文字字幕）
+  fonts/*.ttf          mkv 里附带的字体（ASS 字幕要靠它们才能显示对）
+```
+
+限制：视频编码要能装进 MPEG-TS（H.264 / H.265 / MPEG-2，几乎所有常见影片都行；
+AV1 / VP9 要先转码）。音轨不能直接装进 TS 的（如 FLAC）会自动转 AAC。图片字幕
+（PGS / VobSub）无法转换，会提示。
+
+### 2. 放到教师机上
+
+把整个课程文件夹拷到教师机 `Teacher.exe` 旁边的 **`课程库\`** 目录。教师端点
+**选择切片课程**，列表里选一门，再点 **▶ 同步播放**。学生机桌面上有同名视频的
+照常用本地的，没有的自动开始拉切片，起播提前量是 10 秒（`STREAM_PLAY_LEAD`），
+给学生机缓冲第一批切片。
+
+### 3. 它是怎么分发的
+
+- 学生机只缓存**播放位置往后约 1 分钟**（7 段）的切片，随播随取；拖进度条就跳到新位置。
+- **学生机之间互相传（P2P）**：教师端充当 tracker，记着谁有哪一段。学生机先问
+  同学要，同学没有或者忙才找教师机。教师机同时最多给 8 台上传
+  （`TEACHER_MAX_UPLOADS`），学生机之间每台最多 4 路（`PEER_MAX_UPLOADS`），
+  超了对方会等一会儿再试，不会卡死。
+- **每个切片都校验 sha256**，从同学那里拿到的数据不对就丢掉重取，一台机器的坏
+  数据不会传染全班。
+- **某台学生机慢了**：mpv 会自己停在缺的那一段上等（界面显示「缓冲中」），拿到就
+  继续；缓冲期间心跳不会去纠偏（免得和缓冲打架），缓冲完心跳再把它追回教师位置。
+- 缓存放在 `%LOCALAPPDATA%\LanVideoSync\cache`，**下次启动学生端时清空**。
+  播完、停止之后缓存还在，学生机仍然能给同学提供。
+- 教师端状态栏会显示「切片已分发到 N 台学生机，平均缓存 X%」。
+
+### 4. 防火墙：学生机也要放行入站（P2P 要用）
+
+切片模式下，学生机会开一个 HTTP 端口给同学取切片（端口随机，第一次用到才开）。
+Windows 第一次弹防火墙提示时选「专用网络」允许即可。机房批量部署的话用管理员
+命令行一次性放行：
+
+```
+netsh advfirewall firewall add rule name="LanVideoSync Student" dir=in action=allow program="C:\路径\Student\Student.exe" profile=private
+netsh advfirewall firewall add rule name="LanVideoSync Teacher" dir=in action=allow program="C:\路径\Teacher\Teacher.exe" profile=private
+```
+
+**不放行也能播**：学生机之间连不上时，P2P 会悄悄退化成只从教师机拉，只是教师机
+压力大、同时开播的学生多了会慢（教师端 8767 端口也要允许入站）。
+
+> 这违背了 plan.md 里最初的「视频不通过局域网传输」，是后来明确决定加的功能。
+> 控制指令那一路（WebSocket）没有改动。
+
+---
+
 ## 学生端界面
 
 学生端有一个小状态窗口，**只看不用点**：
@@ -183,12 +256,18 @@ src/
     protocol.py   消息编解码
     paths.py      exe 目录 / mpv.exe / 桌面 的定位（打包后路径会变，都收在这）
     log.py        同时写 stdout 和 exe 旁边的 .log 文件
-  teacher/main.py 教师端：Qt 界面 + WebSocket 服务端 + 心跳
+    package.py    切片课程包：manifest、m3u8 生成、校验
+    segserver.py  切片 HTTP 服务（教师机和学生机共用）：本机 mpv 入口 + 同学入口
+  teacher/
+    main.py       教师端：Qt 界面 + WebSocket 服务端 + 心跳 + P2P tracker
+    library.py    「选择切片课程」对话框
   student/
     main.py       学生端逻辑：自动发现、连接、执行指令、纠偏、手动指定教师机
     state.py      学生端运行状态（逻辑层写，界面层读）
+    streaming.py  切片下载器：窗口预取、P2P、sha256 校验、缓存清理
     ui.py         学生端状态窗口（PySide6）
     runner.py     把学生端的 asyncio 循环放到后台线程，给界面用
+tools/slice.py    把电影切成课程包（在你自己的电脑上运行，需要 ffmpeg）
 tests/            见下
 build.py          打包脚本
 ```
@@ -200,7 +279,10 @@ python tests/test_mpv_ipc.py        # mpv IPC 封装，跑在假 mpv 上（14 �
 python tests/live_mpv.py            # 真 mpv 端到端，mkv + mp4 各一遍（29 项，弹 mpv 窗口）
 python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫描（19 项）
 python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
-python tests/test_student_ui.py     # 学生端窗口按钮接线（25 项，offscreen，不需要显示器）
+python tests/test_student_ui.py     # 学生端窗口按钮接线 + 缓存进度显示（31 项，offscreen，不需要显示器）
+python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（79 项，不需要 mpv 和 ffmpeg）
+python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程（19 项，offscreen）
+python tests/live_hls.py            # 真 mpv + ffmpeg：教师机限速时 mpv 会等切片、预读有界、字幕能渲染（12 项）
 python tests/test_integration.py    # 1 教师 + 3 学生同机集成（17 项，弹 5 个窗口）
 ```
 

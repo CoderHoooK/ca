@@ -201,10 +201,11 @@ class MPV:
 
     def start(
         self,
-        video: Path,
+        video: Path | str,
         sub: Path | None = None,
         position: float = 0.0,
         load_timeout: float = 30.0,
+        extra_args: list[str] | None = None,
     ) -> None:
         """启动 mpv 加载视频，**返回时保证已就绪**：文件读完、定位到 position、处于暂停态。
 
@@ -237,6 +238,8 @@ class MPV:
         ]
         if sub is not None and sub.is_file():
             args.append("--sub-file=" + str(sub))
+        # 切片播放时传 --sub-fonts-dir 之类。放在视频地址之前。
+        args.extend(extra_args or [])
         args.append(str(video))
 
         creationflags = getattr(subprocess, "CREATE_NO_WINDOW", 0)
@@ -262,7 +265,7 @@ class MPV:
 
         if not self._loaded.wait(load_timeout):
             self.quit()
-            raise MPVError(f"视频加载超时（{load_timeout:.0f}s）：{video.name}")
+            raise MPVError(f"视频加载超时（{load_timeout:.0f}s）：{getattr(video, 'name', video)}")
 
         if position > 0:
             self._seek_and_settle(position)

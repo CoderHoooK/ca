@@ -122,6 +122,25 @@ def main() -> int:
         check("选中连接后进入手动指定模式并重新连上", student.state.pinned and student.state.conn == st.CONNECTED)
         check("教师机一栏显示手动指定", "手动指定" in window._teacher_label.text(), window._teacher_label.text())
 
+    # ---- 切片播放：缓存进度卡片
+    print("\n切片播放的进度显示")
+    check("普通播放时不显示缓存一行", not window._cache_label.isVisibleTo(window))
+    sstate = student.state
+    sstate.video, sstate.play, sstate.stream = "课程", st.PLAYING, True
+    sstate.stream_total, sstate.stream_have, sstate.from_teacher, sstate.from_peers = 20, 5, 2, 3
+    student.mpv.running = True
+    window.refresh()
+    check("切片播放时显示缓存进度", window._cache_label.isVisibleTo(window), window._cache_label.text())
+    check("显示已缓存段数和百分比", "5/20" in window._cache_label.text() and "25%" in window._cache_label.text())
+    check("显示教师机/同学各提供多少", "教师机 2" in window._cache_label.text() and "同学 3" in window._cache_label.text())
+    sstate.buffering = True
+    window.refresh()
+    check("缓冲时状态栏提示缓冲中", "缓冲" in window._play_label.text(), window._play_label.text())
+    sstate.buffering = False
+    sstate.video, sstate.play, sstate.stream = "", st.IDLE, False
+    window.refresh()
+    check("播放结束后缓存一行隐藏", not window._cache_label.isVisibleTo(window))
+
     # ---- 日志面板
     check("日志面板有内容", "已连接" in window._log_view.toPlainText())
 

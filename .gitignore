@@ -19,3 +19,6 @@ __pycache__/
 # 虚拟环境
 .venv/
 venv/
+
+# 切片课程库（体积很大，不入库；课程由 tools/slice.py 生成）
+课程库/

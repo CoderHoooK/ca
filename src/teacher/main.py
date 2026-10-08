@@ -17,6 +17,7 @@ asyncio 事件循环里，两边用 run_coroutine_threadsafe 通信。
 from __future__ import annotations
 
 import asyncio
+import random
 import sys
 import threading
 import time
@@ -43,6 +44,10 @@ from websockets.exceptions import ConnectionClosed
 from common import config, net, protocol
 from common.log import log
 from common.mpvctl import MPV, MPVError
+from common.package import Manifest
+from common.paths import app_dir
+from common.segserver import FolderProvider, SegServer
+from teacher.library import LibraryDialog
 
 SLIDER_MAX = 1000
 
@@ -71,6 +76,8 @@ class Server(threading.Thread):
     def __init__(self, on_message) -> None:
         super().__init__(daemon=True, name="ws-server")
         self._clients: set = set()
+        # tracker：每个学生连接 → {"host", "port"（它的切片服务端口）, "have"（课程id → 已缓存段号集合）}
+        self._peers: dict = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._on_message = on_message
@@ -124,6 +131,17 @@ class Server(threading.Thread):
                     )
                     continue
 
+                cmd = message.get("cmd")
+                if cmd == protocol.PEER_HELLO:
+                    self._peer_hello(ws, peer, message)
+                    continue
+                if cmd == protocol.HAVE:
+                    self._peer_have(ws, message)
+                    continue
+                if cmd == protocol.SOURCES:
+                    await self._peer_sources(ws, message)
+                    continue
+
                 self._on_message(message, peer)
         except ConnectionClosed:
             # 学生机断网、关机、切换教师机都会走到这里，属于正常现象，
@@ -132,7 +150,67 @@ class Server(threading.Thread):
         finally:
             with self._lock:
                 self._clients.discard(ws)
+                self._peers.pop(ws, None)
             log(f"学生端断开 {peer}")
+
+    # ---------------------------------------------------------------- tracker
+    #
+    # 教师机不转发任何视频数据，只回答「第 n 段谁有」。真正的数据是学生机之间
+    # （以及学生向教师机）直接走 HTTP 拉的，见 common/segserver.py。
+
+    def _peer_hello(self, ws, peer: str, message: dict) -> None:
+        try:
+            port = int(message.get("http_port", 0))
+        except (TypeError, ValueError):
+            return
+        if not 0 < port < 65536:
+            return
+        with self._lock:
+            info = self._peers.setdefault(ws, {"have": {}})
+            info["host"], info["port"] = peer, port
+
+    def _peer_have(self, ws, message: dict) -> None:
+        pkg = str(message.get("pkg", ""))
+        add = message.get("add") or []
+        with self._lock:
+            info = self._peers.setdefault(ws, {"have": {}})
+            have = info["have"].setdefault(pkg, set())
+            for n in add:
+                if isinstance(n, int):
+                    have.add(n)
+
+    async def _peer_sources(self, ws, message: dict) -> None:
+        pkg = str(message.get("pkg", ""))
+        wanted = [n for n in (message.get("n") or []) if isinstance(n, int)]
+        sources: dict[str, list[str]] = {}
+        with self._lock:
+            for n in wanted:
+                owners = [
+                    f"{info['host']}:{info['port']}"
+                    for other, info in self._peers.items()
+                    if other is not ws and "port" in info and n in info["have"].get(pkg, ())
+                ]
+                random.shuffle(owners)  # 打乱，别让所有人都去找同一个同学
+                sources[str(n)] = owners[:4]
+        await ws.send(
+            protocol.encode(
+                {
+                    "cmd": protocol.SOURCES_REPLY,
+                    "req": message.get("req"),
+                    "pkg": pkg,
+                    "sources": sources,
+                }
+            )
+        )
+
+    def swarm_progress(self, pkg: str, total: int) -> tuple[int, float]:
+        """(提供了切片服务的学生机数, 它们平均缓存了这门课的百分之几)。"""
+        with self._lock:
+            peers = [i for i in self._peers.values() if "port" in i]
+            if not peers or total <= 0:
+                return len(peers), 0.0
+            done = sum(len(i["have"].get(pkg, ())) for i in peers)
+        return len(peers), done / (len(peers) * total)
 
     @property
     def client_count(self) -> int:
@@ -161,6 +239,10 @@ class Window(QWidget):
         super().__init__()
         self.mpv = MPV("teacher")
         self.video: Path | None = None
+        # 选了切片课程时用 package（和 video 互斥）
+        self.package: tuple[Path, Manifest] | None = None
+        self._http: SegServer | None = None
+        self._providers: dict[str, FolderProvider] = {}
         self._missing: set[str] = set()
         self._missing_lock = threading.Lock()
 
@@ -181,7 +263,7 @@ class Window(QWidget):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("LanVideoSync 教师端")
-        self.resize(560, 300)
+        self.resize(680, 300)
 
         self._video_label = QLabel("未选择视频")
         self._server_label = QLabel("服务启动中…")
@@ -193,12 +275,14 @@ class Window(QWidget):
         self._status_label = QLabel("就绪")
 
         self._choose_button = QPushButton("选择视频")
+        self._package_button = QPushButton("选择切片课程")
         self._play_button = QPushButton("▶ 同步播放")
         self._pause_button = QPushButton("⏸ 暂停")
         self._resume_button = QPushButton("⏵ 继续")
         self._stop_button = QPushButton("⏹ 停止")
 
         self._choose_button.clicked.connect(self._choose_video)
+        self._package_button.clicked.connect(self._choose_package)
         self._play_button.clicked.connect(self._play)
         self._pause_button.clicked.connect(self._pause)
         self._resume_button.clicked.connect(self._resume)
@@ -213,6 +297,7 @@ class Window(QWidget):
         buttons = QHBoxLayout()
         for button in (
             self._choose_button,
+            self._package_button,
             self._play_button,
             self._pause_button,
             self._resume_button,
@@ -250,10 +335,16 @@ class Window(QWidget):
         if missing:
             self._status_label.setText(f"⚠ {missing} 台学生机没有找到视频")
         elif self.mpv.running:
-            self._status_label.setText(
-                "已暂停" if self.mpv.query_paused() else "播放中"
-            )
-        elif self.video:
+            text = "已暂停" if self.mpv.query_paused() else "播放中"
+            if self.package is not None:
+                _, manifest = self.package
+                peers, fraction = self.server.swarm_progress(
+                    manifest.id, len(manifest.segments)
+                )
+                if peers:
+                    text += f"　｜　切片已分发到 {peers} 台学生机，平均缓存 {fraction:.0%}"
+            self._status_label.setText(text)
+        elif self.video or self.package:
             self._status_label.setText("就绪（尚未开始播放）")
 
     def _set_status(self, text: str) -> None:
@@ -263,6 +354,7 @@ class Window(QWidget):
         """加载视频时会阻塞 UI 线程，先把按钮禁掉，免得老师重复点击。"""
         for button in (
             self._choose_button,
+            self._package_button,
             self._play_button,
             self._pause_button,
             self._resume_button,
@@ -279,10 +371,79 @@ class Window(QWidget):
         if not path:
             return
         self.video = Path(path)
+        self.package = None
         self._video_label.setText(f"视频：{self.video.name}")
         subtitle = self.video.with_suffix(".ass")
         has_sub = subtitle.is_file()
         self._set_status(f"就绪（字幕：{'已找到' if has_sub else '无'}）")
+
+    def _choose_package(self) -> None:
+        dialog = LibraryDialog(self, app_dir() / config.LIBRARY_DIRNAME)
+        if dialog.exec() != LibraryDialog.Accepted or dialog.selected is None:
+            return
+        folder, manifest = dialog.selected
+        self.package = (folder, manifest)
+        self.video = None
+        self._video_label.setText(
+            f"切片课程：{manifest.title}（{len(manifest.segments)} 段，"
+            f"{manifest.total_size / 1048576:.0f} MB）"
+        )
+        self._set_status(f"就绪（字幕：{'已找到' if manifest.subtitles else '无'}）")
+
+    def _ensure_http(self) -> SegServer:
+        """第一次播放切片课程时才起 HTTP 服务。"""
+        if self._http is None:
+            self._http = SegServer(
+                self._providers.get,
+                max_uploads=config.TEACHER_MAX_UPLOADS,
+                port=config.HTTP_PORT,
+            ).start()
+        return self._http
+
+    def _play_package(self) -> None:
+        assert self.package is not None
+        folder, manifest = self.package
+        http = self._ensure_http()
+        self._providers[manifest.id] = FolderProvider(folder, manifest)
+
+        subtitle = folder / manifest.subtitles[0] if manifest.subtitles else None
+        extra = list(config.MPV_STREAM_ARGS)
+        if manifest.fonts:
+            extra.append("--sub-fonts-dir=" + str(folder / "fonts"))
+
+        self._set_status("正在加载课程…")
+        self._set_buttons_enabled(False)
+        QApplication.processEvents()
+        try:
+            # 教师机自己也通过本机的切片服务播放，和学生走同一条路径
+            self.mpv.start(http.play_url(manifest.id), subtitle, position=0.0, extra_args=extra)
+        except MPVError as exc:
+            QMessageBox.critical(self, "课程加载失败", str(exc))
+            self._set_status("加载失败，详见日志")
+            return
+        finally:
+            self._set_buttons_enabled(True)
+
+        with self._missing_lock:
+            self._missing.clear()
+
+        # 学生机要先把第一段拉下来才能开播，提前量比本地播放长
+        start_at = self._start_at_after(config.STREAM_PLAY_LEAD)
+        self._run_at(start_at, self.mpv.play)
+        self.server.broadcast(
+            {
+                "cmd": protocol.PLAY,
+                "video": manifest.source_name or manifest.title,
+                "position": 0.0,
+                "start_at": start_at,
+                "package": {
+                    "id": manifest.id,
+                    "title": manifest.title,
+                    "http_port": http.port,
+                },
+            }
+        )
+        log(f"广播 PLAY 切片课程《{manifest.title}》，{config.STREAM_PLAY_LEAD:g}s 后起播")
 
     @staticmethod
     def _start_at_after(seconds: float) -> float:
@@ -295,8 +456,11 @@ class Window(QWidget):
         QTimer.singleShot(delay_ms, callback)
 
     def _play(self) -> None:
+        if self.package is not None:
+            self._play_package()
+            return
         if self.video is None:
-            QMessageBox.warning(self, "提示", "请先选择一个视频。")
+            QMessageBox.warning(self, "提示", "请先选择一个视频或切片课程。")
             return
 
         subtitle = self.video.with_suffix(".ass")
@@ -447,6 +611,8 @@ class Window(QWidget):
 
     def closeEvent(self, event) -> None:
         self.mpv.quit()
+        if self._http is not None:
+            self._http.stop()
         event.accept()
 
 

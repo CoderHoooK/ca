@@ -67,3 +67,19 @@ def desktop_dir() -> Path:
         if fallback.is_dir():
             return fallback
     return home / "Desktop"
+
+
+def cache_root() -> Path:
+    """学生端的切片缓存根目录。config.CACHE_DIR 可以覆盖。
+
+    放在 %LOCALAPPDATA% 而不是程序目录：学生机的程序目录常常是只读的，
+    而且缓存是几个 GB 的临时数据，不该混在程序文件里。
+    """
+    from . import config
+
+    if config.CACHE_DIR:
+        return Path(config.CACHE_DIR)
+    base = os.environ.get("LOCALAPPDATA")
+    if base:
+        return Path(base) / "LanVideoSync" / "cache"
+    return Path.home() / ".cache" / "lanvideosync"

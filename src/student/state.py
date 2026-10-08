@@ -53,6 +53,14 @@ class StudentState:
     has_subtitle: bool = False
     teacher_position: float | None = None   # 教师端心跳里的位置（秒）
 
+    # ---- 切片播放（桌面上没有视频时，从教师机/同学那里拉）----
+    stream: bool = False         # 当前视频是不是靠切片播的
+    stream_have: int = 0         # 已缓存的段数
+    stream_total: int = 0
+    from_teacher: int = 0        # 其中从教师机拉的段数
+    from_peers: int = 0          # 从同学机器拉的段数
+    buffering: bool = False      # mpv 正在等某一段（画面卡住）
+
     # ---- 本机环境 ----
     mpv_ok: bool = True          # 找得到 mpv.exe
     desktop_videos: int = 0      # 桌面上能认出的视频数量
