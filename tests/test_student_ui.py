@@ -144,15 +144,19 @@ def main() -> int:
     # ---- 日志面板
     check("日志面板有内容", "已连接" in window._log_view.toPlainText())
 
-    # ---- 关窗口：有托盘就藏起来，没有托盘就真退出
+    # ---- 关窗口：点 × 直接退出（不再藏到托盘）
     print("\n关闭窗口")
     from PySide6.QtGui import QCloseEvent
-    event = QCloseEvent()
-    window.closeEvent(event)
-    if window._tray is not None:
-        check("有托盘时关窗口只是隐藏，不退出", not event.isAccepted())
-    else:
-        check("没有托盘时关窗口正常退出", event.isAccepted())
+    quit_calls: list[int] = []
+    original_quit = QApplication.quit
+    QApplication.quit = staticmethod(lambda: quit_calls.append(1))  # type: ignore[method-assign]
+    try:
+        event = QCloseEvent()
+        window.closeEvent(event)
+    finally:
+        QApplication.quit = original_quit  # type: ignore[method-assign]
+    check("点 × 接受关闭，不再隐藏到托盘", event.isAccepted())
+    check("点 × 会让应用退出", quit_calls == [1])
 
     window._quitting = True
     runner.stop()

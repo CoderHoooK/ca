@@ -116,6 +116,25 @@ def main() -> int:
             text = window._status_label.text()
             check("状态栏显示切片分发情况", "2 台" in text and "75%" in text, text)
 
+            # 老师直接叉掉播放窗口 → 广播 STOP，学生机一起关
+            sent.clear()
+            window.mpv.running = True
+            window._tick()                      # 记下「播放窗口在」
+            window.mpv.running = False          # 老师点了播放窗口的 ×
+            window._tick()
+            stops = [m for m in sent if m.get("cmd") == protocol.STOP]
+            check("叉掉播放窗口会广播 STOP", len(stops) == 1, str(sent))
+            window._tick()
+            check("只广播一次", len([m for m in sent if m.get("cmd") == protocol.STOP]) == 1)
+            # 点「停止」按钮只广播一次（不会再被「窗口被关」重复广播）
+            sent.clear()
+            window.mpv.running = True
+            window._tick()
+            window._stop()
+            window.mpv.running = False
+            window._tick()
+            check("点「停止」只广播一次 STOP", len([m for m in sent if m.get("cmd") == protocol.STOP]) == 1, str(sent))
+
             # 换成普通视频后，不再走切片
             sent.clear()
             window.package = None

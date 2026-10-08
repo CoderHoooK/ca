@@ -253,7 +253,7 @@ class StudentWindow(QWidget):
         return box
 
     def _setup_tray(self) -> None:
-        """系统托盘：关窗口只是藏起来，学生机上的同步不能因为误点 × 就断掉。"""
+        """系统托盘图标：只提供「显示窗口 / 退出」。点窗口的 × 会直接退出。"""
         if not QSystemTrayIcon.isSystemTrayAvailable():
             return
         tray = QSystemTrayIcon(self.windowIcon(), self)
@@ -311,17 +311,10 @@ class StudentWindow(QWidget):
         QApplication.quit()
 
     def closeEvent(self, event) -> None:
-        if self._tray is not None and not self._quitting:
-            event.ignore()
-            self.hide()
-            self._tray.showMessage(
-                "LanVideoSync",
-                "学生端仍在后台运行，右键托盘图标可退出。",
-                QSystemTrayIcon.Information,
-                3000,
-            )
-            return
+        """点 × 就是退出（连同学生机上的播放窗口一起关），不再藏到托盘。"""
+        self._quitting = True
         event.accept()
+        QApplication.quit()
 
     # ------------------------------------------------------------------ 刷新
 

@@ -244,6 +244,7 @@ class Window(QWidget):
         self._http: SegServer | None = None
         self._providers: dict[str, FolderProvider] = {}
         self._missing: set[str] = set()
+        self._mpv_was_running = False  # 上一次 tick 时播放窗口在不在，用来发现老师叉掉了它
         self._missing_lock = threading.Lock()
 
         self.server = Server(self._on_student_message)
@@ -319,6 +320,8 @@ class Window(QWidget):
 
         self._clients_label.setText(f"已连接学生机：{self.server.client_count}")
 
+        self._notice_player_closed()
+
         position = self.mpv.get_position()
         duration = self.mpv.get_duration()
 
@@ -346,6 +349,20 @@ class Window(QWidget):
             self._status_label.setText(text)
         elif self.video or self.package:
             self._status_label.setText("就绪（尚未开始播放）")
+
+    def _notice_player_closed(self) -> None:
+        """老师直接叉掉了播放窗口：等同于点「停止」，让学生机的播放窗口也关掉。
+
+        点「停止」「换视频」时我们自己会关 mpv，那条路径在 _stop 里已经广播过 STOP，
+        并把 _mpv_was_running 置回 False，所以这里不会重复广播。
+        """
+        running = self.mpv.running
+        if self._mpv_was_running and not running:
+            self.server.broadcast({"cmd": protocol.STOP})
+            self._slider.setValue(0)
+            self._time_label.setText("--:-- / --:--")
+            log("教师机播放窗口被关闭，广播 STOP")
+        self._mpv_was_running = running
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
@@ -558,6 +575,7 @@ class Window(QWidget):
             return
         self.server.broadcast({"cmd": protocol.STOP})
         self.mpv.stop()
+        self._mpv_was_running = False
         self._slider.setValue(0)
         self._time_label.setText("--:-- / --:--")
         self._set_status("已停止")
