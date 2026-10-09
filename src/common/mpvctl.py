@@ -318,6 +318,12 @@ class MPV:
         self.command("set_property", "pause", True)
         self._paused = True
 
+    def set_quiet_boost(self, on: bool) -> None:
+        """开/关「增强轻声」（音频滤镜），播放中随时可以切，不用重启 mpv。"""
+        from common import config  # 放函数里：mpvctl 本身不依赖配置，只有这里用
+
+        self.command("set_property", "af", config.QUIET_BOOST_AF if on else "")
+
     def query_paused(self) -> bool:
         """问 mpv 现在到底是不是暂停，并用权威结果刷新缓存。
 

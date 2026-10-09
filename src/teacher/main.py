@@ -29,6 +29,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
+    QCheckBox,
     QFileDialog,
     QHBoxLayout,
     QLabel,
@@ -368,6 +369,20 @@ class Window(QWidget):
         lead_row.addStretch(1)
         layout.addLayout(lead_row)
 
+        # 增强轻声：教室音箱常有「无信号自动待机」，对白轻的时候会睡过去，得去调音量才醒。
+        # 打开后 mpv 把轻声自动拉高。只影响教师机自己的声音，学生机不变。
+        self._boost_check = QCheckBox("增强轻声（教室音箱老是自己没声音时打开）")
+        self._boost_check.setChecked(self._settings.value("quiet_boost", False, type=bool))
+        self._boost_check.setToolTip(
+            "把电影里的轻声（安静的对白、片头片尾）自动拉高。\n"
+            "音箱有「无信号自动待机」时，信号太弱会被当成没声音而休眠；\n"
+            "打开这个就不容易睡过去，后排也更容易听清对白。\n"
+            "代价：音量起伏变小，爆炸声不会比对白大很多。播放中也可以随时开关。\n"
+            "只影响教师机自己的声音，学生机不变。"
+        )
+        self._boost_check.toggled.connect(self._on_boost_toggled)
+        layout.addWidget(self._boost_check)
+
         layout.addWidget(self._clients_label)
         self._roster = Roster()
         layout.addWidget(self._roster, 1)
@@ -427,6 +442,15 @@ class Window(QWidget):
             self._time_label.setText("--:-- / --:--")
             log("教师机播放窗口被关闭，广播 STOP")
         self._mpv_was_running = running
+
+    def _on_boost_toggled(self, on: bool) -> None:
+        self._settings.setValue("quiet_boost", on)
+        self._apply_quiet_boost()
+
+    def _apply_quiet_boost(self) -> None:
+        """把复选框的状态应用到正在播放的 mpv。没在播放就什么都不做（下次开播时会应用）。"""
+        if self.mpv.running:
+            self._safe(self.mpv.set_quiet_boost, self._boost_check.isChecked())
 
     def _set_status(self, text: str) -> None:
         self._status_label.setText(text)
@@ -498,6 +522,7 @@ class Window(QWidget):
         try:
             # 教师机自己也通过本机的切片服务播放，和学生走同一条路径
             self.mpv.start(http.play_url(manifest.id), subtitle, position=0.0, extra_args=extra)
+            self._apply_quiet_boost()
         except MPVError as exc:
             QMessageBox.critical(self, "课程加载失败", str(exc))
             self._set_status("加载失败，详见日志")
@@ -557,6 +582,7 @@ class Window(QWidget):
         try:
             # 暂停态加载：老师这会儿还看不到画面，等 start_at 才开
             self.mpv.start(self.video, subtitle, position=0.0)
+            self._apply_quiet_boost()
         except MPVError as exc:
             QMessageBox.critical(self, "视频加载失败", str(exc))
             self._set_status("加载失败，详见日志")

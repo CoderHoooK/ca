@@ -47,6 +47,9 @@ class FakeMPV:
         self.started = {"video": str(video), "subtitle": subtitle, "extra": list(extra_args or [])}
         self.running = True
 
+    boost: list = []
+
+    def set_quiet_boost(self, on): self.boost.append(bool(on))
     def play(self): self.calls.append("play"); self.paused = False
     def pause(self): self.calls.append("pause"); self.paused = True
     def seek(self, position): self.calls.append("seek")
@@ -169,6 +172,37 @@ def main() -> int:
             check("只改内容时不重建行（进度条对象不变）", roster.cellWidget(0, 2) is bar_widget and bar_widget.value() == 75)
             roster.update_rows(rows[:2])
             check("学生离开后行数减少", roster.rowCount() == 2)
+
+            # ---- 增强轻声
+            check("「增强轻声」默认关闭", not window._boost_check.isChecked())
+            window.mpv.boost = []
+            window.mpv.running = True
+            window._boost_check.setChecked(True)
+            check("播放中勾选：立刻对 mpv 生效", window.mpv.boost == [True], str(window.mpv.boost))
+            window._boost_check.setChecked(False)
+            check("播放中取消：立刻关掉", window.mpv.boost == [True, False])
+            window._boost_check.setChecked(True)
+            check("设置被记住", QSettings(QSettings.IniFormat, QSettings.UserScope, "LanVideoSync", "Teacher")
+                  .value("quiet_boost", type=bool) is True)
+            window.mpv.running = False
+            window.mpv.boost = []
+            window._boost_check.setChecked(False)
+            window._boost_check.setChecked(True)
+            check("没在播放时勾选不碰 mpv", window.mpv.boost == [])
+            sent.clear()
+            window.package = (folder, manifest)
+            window._play()
+            check("开播后自动应用（切片课程）", window.mpv.boost == [True], str(window.mpv.boost))
+            window.mpv.boost = []
+            window.package = None
+            window.video = tmp / "普通.mkv"
+            window.video.write_bytes(b"x")
+            window._play()
+            check("开播后自动应用（本地视频）", window.mpv.boost == [True], str(window.mpv.boost))
+            window._boost_check.setChecked(False)
+            window.mpv.running = False
+            window.package = (folder, manifest)
+            window.video = None
 
             # 老师直接叉掉播放窗口 → 广播 STOP，学生机一起关
             sent.clear()

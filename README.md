@@ -112,6 +112,16 @@ AV1 / VP9 要先转码）。音轨不能直接装进 TS 的（如 FLAC）会自�
 照常用本地的，没有的自动开始拉切片，起播提前量默认 20 秒，给学生机缓冲第一批切片。
 教师端窗口里有个 **切片起播提前量**（5–120 秒），学生多、教师机带宽小就调大，改了自动记住，不用重新打包。
 
+### 增强轻声（教室音箱自己没声音时）
+
+有些教室音箱/功放带「无信号自动待机」：电影里对白轻、信号弱的时候它以为没声音就睡了，要去把音量调大才醒。
+教师端窗口里勾上 **增强轻声**，教师机的 mpv 会用动态音量归一化（`dynaudnorm`，见 `config.QUIET_BOOST_AF`）
+把轻声自动拉高（实测把 -63dB 的轻声拉到 -43dB），音箱就不容易睡过去，后排也更容易听清对白。
+
+- 播放中可以随时开关，不用重启；设置会被记住（`Teacher.ini` 的 `quiet_boost`）。
+- 只影响教师机自己的声音，学生机不变。
+- 代价：音量起伏变小（爆炸声不会比对白大很多），整体会偏响，开了之后可以把音箱音量往下调一点。
+
 ### 3. 它是怎么分发的
 
 - 学生机只缓存**播放位置往后约 1 分钟**（7 段）的切片，随播随取；拖进度条就跳到新位置。
@@ -290,7 +300,7 @@ python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫
 python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
 python tests/test_student_ui.py     # 学生端窗口按钮接线 + 切片缓存显示（45 项，offscreen，不需要显示器）
 python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（82 项，不需要 mpv 和 ffmpeg）
-python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表、起播提前量设置（38 项，offscreen）
+python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表、起播提前量设置、增强轻声开关（45 项，offscreen）
 python tests/live_hls.py            # 真 mpv + ffmpeg：教师机限速时 mpv 会等切片、预读有界、字幕能渲染（12 项）
 python tests/test_integration.py    # 1 教师 + 3 学生同机集成（17 项，弹 5 个窗口）
 ```

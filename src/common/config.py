@@ -97,3 +97,9 @@ MPV_STREAM_ARGS = ["--cache=yes", "--cache-secs=20", "--demuxer-readahead-secs=2
 # 学生端缓存目录。None 表示用默认位置（Windows: %LOCALAPPDATA%\\LanVideoSync\\cache）。
 # 每次启动学生端时会清掉旧缓存。
 CACHE_DIR = None
+
+# 「增强轻声」：mpv 的动态音量归一化。把电影里的轻声（安静的对白、片头片尾）自动拉高，
+# 避免信号太弱被教室音箱/功放的「无信号自动待机」判成没声音；顺带让后排更容易听清对白。
+# 代价：动态范围变小，爆炸声不会比对白大很多。f=250ms 的调整窗口，最多放大 10 倍（20dB），
+# 峰值压在 0.9 以内不会削波。实测一段 -63dB 的轻声被拉到 -43dB。
+QUIET_BOOST_AF = "lavfi=[dynaudnorm=f=250:g=15:m=10:p=0.9]"
