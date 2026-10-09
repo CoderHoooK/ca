@@ -25,6 +25,8 @@ VIDEO_NOT_FOUND = "VIDEO_NOT_FOUND"  # {video}
 PEER_HELLO = "PEER_HELLO"            # {http_port}        我能给别的学生机提供切片的端口
 HAVE = "HAVE"                        # {pkg, add:[idx..]} 我又缓存好了这几段
 SOURCES = "SOURCES"                  # {req, pkg, n:[idx..]}  这几段谁有？
+STATUS = "STATUS"                    # {name, play, stream, have, total, from_teacher, from_peers, buffering}
+#                                      学生机的当前状态，教师端的「学生机列表」用；每秒左右报一次
 
 # ---- 教师端 → 学生端（切片传输的 tracker 应答）----
 

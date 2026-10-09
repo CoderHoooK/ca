@@ -125,7 +125,9 @@ AV1 / VP9 要先转码）。音轨不能直接装进 TS 的（如 FLAC）会自�
   继续；缓冲期间心跳不会去纠偏（免得和缓冲打架），缓冲完心跳再把它追回教师位置。
 - 缓存放在 `%LOCALAPPDATA%\LanVideoSync\cache`，**下次启动学生端时清空**。
   播完、停止之后缓存还在，学生机仍然能给同学提供。
-- 教师端状态栏会显示「切片已分发到 N 台学生机，平均缓存 X%」。
+- 教师端窗口里有一张**学生机列表**：每台连着的学生机一行，显示状态（待机 / 加载中 / 播放中 / 缓冲中 / 桌面没有这个视频）、
+  缓存进度条（已缓存 n/N 段）、以及切片分别从教师机和同学拿了多少段。用本地视频的显示「本地视频」。
+  学生端每秒上报一次状态，状态栏另外显示「切片已分发到 N 台学生机，平均缓存 X%」。
 
 ### 4. 防火墙：学生机也要放行入站（P2P 要用）
 
@@ -280,8 +282,8 @@ python tests/live_mpv.py            # 真 mpv 端到端，mkv + mp4 各一遍（
 python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫描（19 项）
 python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
 python tests/test_student_ui.py     # 学生端窗口按钮接线 + 缓存进度显示（31 项，offscreen，不需要显示器）
-python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（79 项，不需要 mpv 和 ffmpeg）
-python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程（19 项，offscreen）
+python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（82 项，不需要 mpv 和 ffmpeg）
+python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表（34 项，offscreen）
 python tests/live_hls.py            # 真 mpv + ffmpeg：教师机限速时 mpv 会等切片、预读有界、字幕能渲染（12 项）
 python tests/test_integration.py    # 1 教师 + 3 学生同机集成（17 项，弹 5 个窗口）
 ```

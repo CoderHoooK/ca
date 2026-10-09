@@ -22,6 +22,7 @@ from PySide6.QtWidgets import QApplication
 from common import config, protocol
 from teacher import main as teacher_main
 from teacher.library import LibraryDialog, describe
+from teacher.roster import describe as describe_row
 from test_streaming import http, make_package
 
 APP = None
@@ -115,6 +116,40 @@ def main() -> int:
             window._tick()
             text = window._status_label.text()
             check("状态栏显示切片分发情况", "2 台" in text and "75%" in text, text)
+
+            # ---- 学生机列表
+            rows = [
+                {"id": 1, "host": "10.0.0.1", "name": "PC-01", "play": "playing", "stream": True,
+                 "have": 6, "total": 12, "from_teacher": 2, "from_peers": 4, "buffering": False},
+                {"id": 2, "host": "10.0.0.2", "name": "PC-02", "play": "playing", "stream": False},
+                {"id": 3, "host": "10.0.0.3", "name": "PC-03", "play": "playing", "stream": True,
+                 "have": 3, "total": 12, "buffering": True},
+                {"id": 4, "host": "10.0.0.4", "name": "PC-04", "play": "not_found"},
+                {"id": 5, "host": "10.0.0.5", "name": "", "play": ""},
+                {"id": 6, "host": "10.0.0.6", "name": "PC-06", "play": "idle"},
+            ]
+            text, _c, pct, bar, src = describe_row(rows[0])
+            check("切片播放：显示进度和来源", pct == 50 and "6/12" in bar and src == "2 / 4" and "播放中" in text, f"{text} {bar} {src}")
+            text, _c, pct, bar, _s = describe_row(rows[1])
+            check("本地视频：进度条显示「本地视频」", pct == 100 and bar == "本地视频" and "本地" in text, f"{text} {bar}")
+            text, color, pct, _b, _s = describe_row(rows[2])
+            check("缓冲中标红", "缓冲" in text and color != "", text)
+            check("没找到视频标红", describe_row(rows[3])[1] != "" and "没有" in describe_row(rows[3])[0])
+            check("还没上报状态的显示「连接中」", "连接中" in describe_row(rows[4])[0])
+            check("待机没有进度条", describe_row(rows[5])[2] is None)
+
+            roster = window._roster
+            roster.update_rows(rows)
+            check("表格每台学生机一行", roster.rowCount() == 6)
+            check("学生机一栏有名字和 IP", "PC-01" in roster.item(0, 0).text() and "10.0.0.1" in roster.item(0, 0).text())
+            check("进度条数值正确", roster.cellWidget(0, 2).value() == 50 and roster.cellWidget(1, 2).value() == 100)
+            check("没有进度的行显示「—」而不是空进度条", roster.cellWidget(5, 2).format() == "—" and roster.cellWidget(5, 2).value() == 0)
+            bar_widget = roster.cellWidget(0, 2)
+            rows[0]["have"] = 9
+            roster.update_rows(rows)
+            check("只改内容时不重建行（进度条对象不变）", roster.cellWidget(0, 2) is bar_widget and bar_widget.value() == 75)
+            roster.update_rows(rows[:2])
+            check("学生离开后行数减少", roster.rowCount() == 2)
 
             # 老师直接叉掉播放窗口 → 广播 STOP，学生机一起关
             sent.clear()

@@ -48,6 +48,7 @@ from common.package import Manifest
 from common.paths import app_dir
 from common.segserver import FolderProvider, SegServer
 from teacher.library import LibraryDialog
+from teacher.roster import Roster
 
 SLIDER_MAX = 1000
 
@@ -78,6 +79,8 @@ class Server(threading.Thread):
         self._clients: set = set()
         # tracker：每个学生连接 → {"host", "port"（它的切片服务端口）, "have"（课程id → 已缓存段号集合）}
         self._peers: dict = {}
+        # 学生机列表：连接 → {"host", "name", 以及学生上报的 STATUS 字段}
+        self._students: dict = {}
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._on_message = on_message
@@ -107,6 +110,7 @@ class Server(threading.Thread):
         peer = ws.remote_address[0] if ws.remote_address else "?"
         with self._lock:
             self._clients.add(ws)
+            self._students[ws] = {"host": peer, "name": "", "since": time.time()}
         log(f"学生端接入 {peer}")
 
         try:
@@ -132,6 +136,9 @@ class Server(threading.Thread):
                     continue
 
                 cmd = message.get("cmd")
+                if cmd == protocol.STATUS:
+                    self._student_status(ws, message)
+                    continue
                 if cmd == protocol.PEER_HELLO:
                     self._peer_hello(ws, peer, message)
                     continue
@@ -151,12 +158,42 @@ class Server(threading.Thread):
             with self._lock:
                 self._clients.discard(ws)
                 self._peers.pop(ws, None)
+                self._students.pop(ws, None)
             log(f"学生端断开 {peer}")
 
     # ---------------------------------------------------------------- tracker
     #
     # 教师机不转发任何视频数据，只回答「第 n 段谁有」。真正的数据是学生机之间
     # （以及学生向教师机）直接走 HTTP 拉的，见 common/segserver.py。
+
+    def _student_status(self, ws, message: dict) -> None:
+        """记下学生机上报的状态。字段都当成不可信输入，类型不对就丢掉。"""
+        def num(key: str) -> int:
+            value = message.get(key, 0)
+            return value if isinstance(value, int) and not isinstance(value, bool) and value >= 0 else 0
+
+        with self._lock:
+            info = self._students.get(ws)
+            if info is None:
+                return
+            info.update(
+                name=str(message.get("name", ""))[:64],
+                play=str(message.get("play", ""))[:16],
+                stream=bool(message.get("stream", False)),
+                have=num("have"),
+                total=num("total"),
+                from_teacher=num("from_teacher"),
+                from_peers=num("from_peers"),
+                buffering=bool(message.get("buffering", False)),
+                seen=time.time(),
+            )
+
+    def students_snapshot(self) -> list[dict]:
+        """当前连着的学生机（给界面用的拷贝）。还没上报状态的只有 host。"""
+        with self._lock:
+            rows = [dict(info, id=id(ws)) for ws, info in self._students.items()]
+        rows.sort(key=lambda r: (r.get("name") or r["host"], r["host"], r["since"]))
+        return rows
 
     def _peer_hello(self, ws, peer: str, message: dict) -> None:
         try:
@@ -264,7 +301,7 @@ class Window(QWidget):
 
     def _build_ui(self) -> None:
         self.setWindowTitle("LanVideoSync 教师端")
-        self.resize(680, 300)
+        self.resize(760, 520)
 
         self._video_label = QLabel("未选择视频")
         self._server_label = QLabel("服务启动中…")
@@ -308,6 +345,8 @@ class Window(QWidget):
         layout.addLayout(buttons)
 
         layout.addWidget(self._clients_label)
+        self._roster = Roster()
+        layout.addWidget(self._roster, 1)
         layout.addWidget(self._status_label)
 
     # --------------------------------------------------------------- UI 刷新
@@ -319,6 +358,7 @@ class Window(QWidget):
             )
 
         self._clients_label.setText(f"已连接学生机：{self.server.client_count}")
+        self._roster.update_rows(self.server.students_snapshot())
 
         self._notice_player_closed()
 

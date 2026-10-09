@@ -362,8 +362,6 @@ async def test_swarm(tmp: Path) -> None:
               and b.state.from_peers + c.state.from_peers == 2 * SEGMENTS,
               f"b={b.state.from_peers} c={c.state.from_peers}")
         check("教师机的切片上传数为 0", teacher_http.uploads == 0, f"uploads={teacher_http.uploads}")
-        check("学生之间互相也传了（不只种子在上传）",
-              sum(s._seg_server.uploads for s in students[1:]) > 0)
         ok = await wait_until(lambda: all(s.state.play == st.PLAYING for s in students), 10)
         check("到 start_at 后三个学生都在播放", ok, str([s.state.play for s in students]))
         for i, s in enumerate(students):
@@ -372,9 +370,24 @@ async def test_swarm(tmp: Path) -> None:
                   and s.mpv.sub is not None and "--cache-secs=20" in s.mpv.extra,
                   s.mpv.url)
 
+        # 谁给谁传是随机的（B 可能全找种子要，也可能找 C），所以只检查总量：
+        # 两台学生要的切片 + 各一份字幕，全部是同学上传的（教师机 0）。
+        check("同学们的上传总数 = 两台学生下载的文件数（切片 + 字幕）",
+              sum(s._seg_server.uploads for s in students) == 2 * (SEGMENTS + 1),
+              str([s._seg_server.uploads for s in students]))
         for i, s in enumerate(students):
             problems = verify_package(s._cache_dir / manifest.id, manifest)
             check(f"学生 {i} 缓存内容全部通过校验", problems == [], str(problems))
+
+        # 学生机列表（教师端界面的数据源）：学生每秒上报一次状态
+        await asyncio.sleep(1.2)
+        rows = server.students_snapshot()
+        check("教师端的学生机列表里有三台，且都报了名字", len(rows) == 3 and all(r.get("name") for r in rows), str(rows[:1]))
+        check("列表显示它们都在用切片播放、缓存 12/12",
+              all(r.get("stream") and r.get("have") == SEGMENTS and r.get("total") == SEGMENTS and r.get("play") == "playing"
+                  for r in rows), str([(r.get("play"), r.get("have")) for r in rows]))
+        by_peers = sorted(r["from_peers"] for r in rows)
+        check("列表里的来源统计：种子 0，另两台各 12 段来自同学", by_peers == [0, SEGMENTS, SEGMENTS] and all(r["from_teacher"] == 0 for r in rows), str(by_peers))
 
         n, fraction = server.swarm_progress(manifest.id, SEGMENTS)
         check("tracker 统计到三台、平均 100%", n == 3 and abs(fraction - 1.0) < 1e-6, f"n={n} fraction={fraction}")

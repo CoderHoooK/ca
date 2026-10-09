@@ -26,6 +26,7 @@ import itertools
 import os
 import sys
 import threading
+import time
 import traceback
 from pathlib import Path
 
@@ -612,6 +613,7 @@ class Student:
 
             # 重连后 tracker 的记录是空的：把我的切片服务端口和已缓存的段重新报上去
             self._ws = ws
+            status_task = asyncio.create_task(self._status_loop(ws))
             self._send_peer_hello()
             for pkg_id, session in self._streams.items():
                 if session.have:
@@ -636,6 +638,43 @@ class Student:
                 raise
             finally:
                 self._ws = None
+                status_task.cancel()
+
+    def _status_message(self) -> dict:
+        """给教师端「学生机列表」看的当前状态。"""
+        s = self.state
+        play = s.play
+        # 学生自己关掉了播放窗口：别还报「播放中」
+        if play in (st.PLAYING, st.PAUSED, st.WAITING) and not self.mpv.running:
+            play = st.IDLE
+        return {
+            "cmd": protocol.STATUS,
+            "name": net.machine_name(),
+            "play": play,
+            "stream": bool(s.stream),
+            "have": s.stream_have,
+            "total": s.stream_total,
+            "from_teacher": s.from_teacher,
+            "from_peers": s.from_peers,
+            "buffering": bool(s.buffering),
+        }
+
+    async def _status_loop(self, ws) -> None:
+        """变了就立刻报，没变也每 3 秒报一次（教师端据此知道我还活着、状态没丢）。"""
+        last: dict | None = None
+        last_sent = 0.0
+        try:
+            while True:
+                message = self._status_message()
+                now = time.monotonic()
+                if message != last or now - last_sent >= 3.0:
+                    await ws.send(protocol.encode(message))
+                    last, last_sent = message, now
+                await asyncio.sleep(0.5)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            return  # 连接断了，_session 那边会处理
 
     async def run_forever(self) -> None:
         """找教师端 → 连上 → 执行指令，断了就回到第一步，永不退出。"""
