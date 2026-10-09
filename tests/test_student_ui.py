@@ -141,6 +141,85 @@ def main() -> int:
     window.refresh()
     check("播放结束后缓存一行隐藏", not window._cache_label.isVisibleTo(window))
 
+    # ---- 切片播放：当前片段来源 + 缓存分布（用真的下载会话，教师机和「同学」都是真 HTTP 服务）
+    print("\n切片播放：当前片段的来源和缓存分布")
+    sys.path.insert(0, str(ROOT / "tests"))
+    import shutil, tempfile, time as _time
+    from test_streaming import SEG_SIZE, SEGMENTS, make_package
+    from common.segserver import FolderProvider, SegServer
+    from student.streaming import StreamSession
+    tmpdir = Path(tempfile.mkdtemp(prefix="lvs_ui_"))
+    folder, manifest = make_package(tmpdir / "pkg")
+    provider = FolderProvider(folder, manifest)
+    teacher_http = SegServer({manifest.id: provider}.get, max_uploads=8).start()
+    peer_http = SegServer({manifest.id: provider}.get, max_uploads=8).start()
+    config.PREFETCH_AHEAD = SEGMENTS
+    session = StreamSession(
+        manifest, tmpdir / "cache", ("127.0.0.1", teacher_http.port),
+        # 偶数段有「同学」可以要，奇数段没有（只能找教师机）
+        sources_fn=lambda pkg, n: [("127.0.0.1", peer_http.port)] if n % 2 == 0 else [],
+    )
+    for i in (0, 1):  # 本机缓存里原来就有的
+        shutil.copy(folder / f"seg_{i:05d}.ts", session.dir / f"seg_{i:05d}.ts")
+        session.have.add(i); session.origin[i] = ("cache", "")
+    session.set_focus_time(0.0)   # 窗口只往播放位置后面取，所以先从头下完
+    session.start()
+    t_end = _time.monotonic() + 15
+    while session.cached < SEGMENTS and _time.monotonic() < t_end:
+        _time.sleep(0.05)
+    session.stop()
+    session.set_focus_time(6.0)   # 然后让「当前」落在第 4 段（下标 3）
+
+    snap = session.snapshot()
+    check("快照：每段一个标记", len(snap["map"]) == SEGMENTS and snap["have"] == SEGMENTS)
+    check("快照：前两段是本机缓存，偶数段来自同学，奇数段来自教师机",
+          snap["map"][:2] == "cc" and all(snap["map"][i] == "p" for i in range(2, SEGMENTS, 2))
+          and all(snap["map"][i] == "t" for i in range(3, SEGMENTS, 2)), snap["map"])
+    check("快照：缓存字节数", snap["bytes"] == SEGMENTS * SEG_SIZE, str(snap["bytes"]))
+    check("快照：当前片段是第 3 下标，来自教师机", snap["current"] == 3 and snap["current_kind"] == "teacher", str(snap["current_kind"]))
+
+    student._streams[manifest.id] = session
+    student._stream = session
+    sstate.video, sstate.play, sstate.stream = "课程", st.PLAYING, True
+    sstate.stream_total, sstate.stream_have = SEGMENTS, SEGMENTS
+    sstate.from_teacher, sstate.from_peers = session.from_teacher, session.from_peers
+    student.mpv.running = True
+    window.refresh()
+    check("显示当前片段：第几段、时间范围、来源",
+          "第 4 段" in window._cur_label.text() and "00:06–00:08" in window._cur_label.text() and "来源：教师机" in window._cur_label.text(),
+          window._cur_label.text())
+    check("显示最近下载的一段及来源", "最近下载" in window._cur_label.text())
+    check("缓存一行带上大小", "MB" in window._cache_label.text() or "KB" in window._cache_label.text(), window._cache_label.text())
+    check("缓存分布图和图例可见", window._map.isVisibleTo(window) and window._legend.isVisibleTo(window))
+    check("分布图拿到每段的颜色码和当前位置", window._map._codes == snap["map"] and window._map._current == 3)
+
+    session.set_focus_time(4.0)   # 第 3 段（下标 2），来自同学
+    window.refresh()
+    check("当前片段来自同学时显示同学的地址", "来源：同学 127.0.0.1" in window._cur_label.text(), window._cur_label.text())
+    session.set_focus_time(0.0)   # 下标 0：本机缓存
+    window.refresh()
+    check("本机缓存里原来就有的显示「本机缓存」", "本机缓存" in window._cur_label.text().splitlines()[0], window._cur_label.text())
+
+    empty = StreamSession(manifest, tmpdir / "cache_empty", None)
+    student._stream = empty
+    empty.set_focus_time(10.0)
+    window.refresh()
+    check("当前片段还没到时提示「正在获取」", "还没缓存" in window._cur_label.text(), window._cur_label.text())
+
+    window.resize(520, 700)
+    window.show(); app.processEvents(); window.refresh(); app.processEvents()
+    student._stream = session; window.refresh(); app.processEvents()
+    window.grab().save(str(tmpdir / "student_stream_ui.png"))  # 想看效果就把这行的路径改成自己的
+
+    student._stream = None
+    student._streams.pop(manifest.id, None)
+    sstate.video, sstate.play, sstate.stream = "", st.IDLE, False
+    sstate.stream_total = sstate.stream_have = sstate.from_teacher = sstate.from_peers = 0
+    window.refresh()
+    check("播放结束后这几行都隐藏", not window._cur_label.isVisibleTo(window) and not window._map.isVisibleTo(window))
+    teacher_http.stop(); peer_http.stop()
+    shutil.rmtree(tmpdir, ignore_errors=True)
+
     # ---- 日志面板
     check("日志面板有内容", "已连接" in window._log_view.toPlainText())
 

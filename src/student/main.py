@@ -403,6 +403,11 @@ class Student:
     def _on_buffering(self, buffering: bool) -> None:
         pass  # 缓冲状态由 SegServer 的 on_wait 统一维护，这里留给以后扩展
 
+    def stream_info(self) -> dict | None:
+        """界面用：当前切片播放的缓存详情；不是切片播放时返回 None。"""
+        session = self._stream
+        return session.snapshot() if session is not None else None
+
     def _on_stream_progress(self, session: StreamSession) -> None:
         if session is self._stream:
             self.state.stream_have = session.cached

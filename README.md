@@ -159,6 +159,13 @@ netsh advfirewall firewall add rule name="LanVideoSync Teacher" dir=in action=al
 - 桌面上识别到几个视频；没找到 `mpv.exe` 会用红字警告
 - 「运行日志」折叠面板：现场排查时不用去翻 `Student.log`
 
+学生端窗口在切片播放时多出这几行（不用操作，只是看）：
+
+- **缓存**：已缓存 n/N 段、多少 MB，以及教师机和同学各提供了多少段；
+- **当前片段**：现在播到第几段、时间范围，**这一段是从哪来的**（教师机 / 同学的 IP / 本机缓存里原来就有的），
+  还没到手时显示「正在获取」；另有一行「最近下载」；
+- **缓存分布**：每段一个小方块，蓝 = 教师机、绿 = 同学、灰 = 本机缓存、浅灰 = 未缓存，红框是当前这一段。
+
 窗口右上角的 × **就是退出**：学生端和它的播放窗口一起关掉。想让它在后台跑、
 没有窗口，用 `--silent` 启动。托盘图标只提供「显示窗口 / 退出」。
 
@@ -281,7 +288,7 @@ python tests/test_mpv_ipc.py        # mpv IPC 封装，跑在假 mpv 上（14 �
 python tests/live_mpv.py            # 真 mpv 端到端，mkv + mp4 各一遍（29 项，弹 mpv 窗口）
 python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫描（19 项）
 python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
-python tests/test_student_ui.py     # 学生端窗口按钮接线 + 缓存进度显示（31 项，offscreen，不需要显示器）
+python tests/test_student_ui.py     # 学生端窗口按钮接线 + 切片缓存显示（45 项，offscreen，不需要显示器）
 python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（82 项，不需要 mpv 和 ffmpeg）
 python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表（34 项，offscreen）
 python tests/live_hls.py            # 真 mpv + ffmpeg：教师机限速时 mpv 会等切片、预读有界、字幕能渲染（12 项）

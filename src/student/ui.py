@@ -17,7 +17,7 @@ from __future__ import annotations
 import sys
 
 from PySide6.QtCore import Qt, QTimer
-from PySide6.QtGui import QAction, QFont
+from PySide6.QtGui import QAction, QColor, QFont, QPainter, QPen
 from PySide6.QtWidgets import (
     QApplication,
     QFrame,
@@ -69,6 +69,73 @@ QPlainTextEdit {{ font-family: Consolas, "Courier New", monospace; font-size: 11
                   background: #fbfbfc; }}
 QPushButton {{ padding: 5px 12px; }}
 """
+
+
+SEG_COLORS = {
+    ".": "#d5d8dc",   # 还没缓存
+    "t": "#3498db",   # 教师机给的
+    "p": "#27ae60",   # 同学给的
+    "c": "#95a5a6",   # 本机缓存里原来就有的
+}
+
+
+class SegmentMap(QWidget):
+    """每一段一个小方块：颜色表示这段是从哪来的，红框是当前播放的这一段。"""
+
+    CELL, GAP = 9, 2
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._codes = ""
+        self._current = -1
+        policy = self.sizePolicy()
+        policy.setHeightForWidth(True)
+        self.setSizePolicy(policy)
+
+    def set_data(self, codes: str, current: int) -> None:
+        if codes != self._codes or current != self._current:
+            changed_len = len(codes) != len(self._codes)
+            self._codes, self._current = codes, current
+            if changed_len:
+                self.updateGeometry()
+            self.update()
+
+    def _per_row(self, width: int) -> int:
+        return max(1, (width + self.GAP) // (self.CELL + self.GAP))
+
+    def hasHeightForWidth(self) -> bool:
+        return True
+
+    def heightForWidth(self, width: int) -> int:
+        rows = -(-max(1, len(self._codes)) // self._per_row(width))
+        return rows * (self.CELL + self.GAP)
+
+    def sizeHint(self):
+        from PySide6.QtCore import QSize
+        return QSize(300, self.heightForWidth(300))
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        per_row = self._per_row(self.width())
+        step = self.CELL + self.GAP
+        for i, code in enumerate(self._codes):
+            x, y = (i % per_row) * step, (i // per_row) * step
+            painter.fillRect(x, y, self.CELL, self.CELL, QColor(SEG_COLORS.get(code, SEG_COLORS["."])))
+            if i == self._current:
+                painter.setPen(QPen(QColor(RED), 2))
+                painter.drawRect(x, y, self.CELL - 1, self.CELL - 1)
+
+
+def describe_origin(kind: str, host: str) -> str:
+    return {
+        "teacher": "教师机",
+        "peer": f"同学 {host}" if host else "同学",
+        "cache": "本机缓存（之前下载过）",
+    }.get(kind, "—")
+
+
+def format_size(n: int) -> str:
+    return f"{n / 1048576:.0f} MB" if n >= 1048576 else f"{n / 1024:.0f} KB"
 
 
 def format_time(seconds: float | None) -> str:
@@ -189,8 +256,30 @@ class StudentWindow(QWidget):
         self._cache_label.setWordWrap(True)
         grid.addWidget(self._cache_key, 3, 0)
         grid.addWidget(self._cache_label, 3, 1)
-        self._cache_key.setVisible(False)
-        self._cache_label.setVisible(False)
+        self._cur_key = _key("当前片段")
+        self._cur_label = QLabel("—")
+        self._cur_label.setWordWrap(True)
+        grid.addWidget(self._cur_key, 4, 0)
+        grid.addWidget(self._cur_label, 4, 1)
+        self._map_key = _key("缓存分布")
+        self._map = SegmentMap()
+        self._legend = QLabel(
+            f'<span style="color:{SEG_COLORS["t"]}">■</span> 教师机　'
+            f'<span style="color:{SEG_COLORS["p"]}">■</span> 同学　'
+            f'<span style="color:{SEG_COLORS["c"]}">■</span> 本机缓存　'
+            f'<span style="color:{SEG_COLORS["."]}">■</span> 未缓存　'
+            f'<span style="color:{RED}">□</span> 当前'
+        )
+        self._legend.setObjectName("hint")
+        grid.addWidget(self._map_key, 5, 0, Qt.AlignTop)
+        grid.addWidget(self._map, 5, 1)
+        grid.addWidget(self._legend, 6, 1)
+        self._stream_widgets = [
+            self._cache_key, self._cache_label, self._cur_key, self._cur_label,
+            self._map_key, self._map, self._legend,
+        ]
+        for w in self._stream_widgets:
+            w.setVisible(False)
         grid.setColumnStretch(1, 1)
         root.addWidget(play_card)
 
@@ -396,14 +485,39 @@ class StudentWindow(QWidget):
         self._pos_label.setText(format_time(s.teacher_position) if showing else "—")
 
         streaming = bool(s.stream and s.stream_total)
-        self._cache_key.setVisible(streaming)
-        self._cache_label.setVisible(streaming)
-        if streaming:
+        info = self.student.stream_info() if streaming else None
+        for w in (self._cache_key, self._cache_label):
+            w.setVisible(streaming)
+        for w in (self._cur_key, self._cur_label, self._map_key, self._map, self._legend):
+            w.setVisible(info is not None)
+        if not streaming:
+            return
+
+        if info is None:  # 只有状态数字（没有下载会话）
             pct = s.stream_have / s.stream_total
             self._cache_label.setText(
                 f"已缓存 {s.stream_have}/{s.stream_total} 段（{pct:.0%}）　"
                 f"教师机 {s.from_teacher} 段 · 同学 {s.from_peers} 段"
             )
+            return
+
+        pct = info["have"] / info["total"]
+        self._cache_label.setText(
+            f"已缓存 {info['have']}/{info['total']} 段（{pct:.0%}）　"
+            f"{format_size(info['bytes'])} / {format_size(info['total_bytes'])}\n"
+            f"教师机 {info['from_teacher']} 段 · 同学 {info['from_peers']} 段"
+        )
+        span = f"{format_time(info['current_start'])}–{format_time(info['current_end'])}"
+        if info["current_cached"]:
+            now = f"第 {info['current'] + 1} 段（{span}）　来源：{describe_origin(info['current_kind'], info['current_host'])}"
+        else:
+            now = f"第 {info['current'] + 1} 段（{span}）　还没缓存，正在获取…"
+        last = info["last"]
+        if last is not None:
+            n, kind, host = last
+            now += f"\n最近下载：第 {n + 1} 段 ← {describe_origin(kind, host)}"
+        self._cur_label.setText(now)
+        self._map.set_data(info["map"], info["current"])
 
     def _refresh_env(self, s) -> None:
         lines = []

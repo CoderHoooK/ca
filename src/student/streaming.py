@@ -110,10 +110,14 @@ class StreamSession:
 
         # 已经在缓存目录里的段（同一次运行里重播同一门课，不用重新下）
         self.have: set[int] = set()
+        # 每一段是从哪来的：(种类, 主机)。种类 teacher / peer / cache（本机缓存里原来就有的）
+        self.origin: dict[int, tuple[str, str]] = {}
+        self.last_fetch: tuple[int, str, str] | None = None  # 最近下完的一段
         for i, seg in enumerate(manifest.segments):
             path = self.dir / seg.name
             if path.is_file() and path.stat().st_size == seg.size:
                 self.have.add(i)
+                self.origin[i] = ("cache", "")
 
     # ------------------------------------------------------------ Provider
 
@@ -173,6 +177,37 @@ class StreamSession:
     def cached(self) -> int:
         with self._cond:
             return len(self.have)
+
+    def snapshot(self) -> dict:
+        """给界面看的快照：缓存量、当前片段、每段的来源分布。"""
+        with self._cond:
+            have = set(self.have)
+            focus = self._focus
+        origin = dict(self.origin)
+        segs = self.manifest.segments
+        letter = {"teacher": "t", "peer": "p", "cache": "c"}
+        codes = "".join(
+            letter.get(origin.get(i, ("cache", ""))[0], "c") if i in have else "."
+            for i in range(len(segs))
+        )
+        cur = min(focus, len(segs) - 1)
+        kind, host = origin.get(cur, ("", "")) if cur in have else ("", "")
+        return {
+            "have": len(have),
+            "total": len(segs),
+            "bytes": sum(segs[i].size for i in have),
+            "total_bytes": sum(seg.size for seg in segs),
+            "from_teacher": self.from_teacher,
+            "from_peers": self.from_peers,
+            "map": codes,
+            "current": cur,
+            "current_start": segs[cur].start,
+            "current_end": segs[cur].start + segs[cur].duration,
+            "current_cached": cur in have,
+            "current_kind": kind,
+            "current_host": host,
+            "last": self.last_fetch,
+        }
 
     def set_focus_time(self, seconds: float, urgent: bool = False) -> None:
         """教师当前播放到 seconds：预缓存窗口以这里为起点。"""
@@ -334,10 +369,13 @@ class StreamSession:
             if self._stop.is_set():
                 return False
             if self._download_segment(host, port, seg) == "ok":
+                kind = "teacher" if is_teacher else "peer"
                 if is_teacher:
                     self.from_teacher += 1
                 else:
                     self.from_peers += 1
+                self.origin[n] = (kind, host)
+                self.last_fetch = (n, kind, host)
                 return True
         return False
 
