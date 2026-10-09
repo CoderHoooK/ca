@@ -332,8 +332,11 @@ class Student:
             if fonts is not None:
                 extra.append("--sub-fonts-dir=" + str(fonts))
             url = self._ensure_seg_server().play_url(manifest.id)
+            # mpv 加载时要读开头几段来探测流信息。人多、教师机带宽紧的时候这几段要等一阵，
+            # 默认的 30 秒加载超时会把「还在等切片」误判成「播放器启动失败」，所以放宽到和切片等待一致。
             await asyncio.to_thread(
-                self.mpv.start, url, session.subtitle_path(), position, extra_args=extra
+                self.mpv.start, url, session.subtitle_path(), position,
+                load_timeout=config.PLAY_WAIT_TIMEOUT, extra_args=extra,
             )
         except asyncio.CancelledError:
             raise
