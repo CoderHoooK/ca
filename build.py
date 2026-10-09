@@ -92,9 +92,31 @@ def check_pyinstaller() -> None:
         sys.exit("没装 PyInstaller。先运行：pip install pyinstaller")
 
 
+def clean_old_output(name: str) -> None:
+    """先把上一次的 dist\\<name> 删掉。
+
+    删不掉几乎都是因为上次打出来的程序还开着（Windows 不让删正在运行的 exe/dll），
+    PyInstaller 自己删失败只会甩一长串堆栈，这里提前检查并说人话。
+    """
+    old = DIST / name
+    if not old.exists():
+        return
+    try:
+        shutil.rmtree(old)
+    except OSError as exc:
+        sys.exit(
+            f"\n删不掉上一次的打包结果 {old}\n（{exc}）\n\n"
+            f"最常见的原因：{name}.exe 还开着（教师端/学生端窗口、托盘里的图标、后台进程都算）。\n"
+            f"请先关掉它再重新打包，关不掉就在命令行里执行：\n"
+            f"    taskkill /F /IM {name}.exe /T\n"
+            f"还不行的话，检查资源管理器是不是正开着 dist 文件夹，或者杀毒软件正在扫描它。"
+        )
+
+
 def build_one(target: str) -> Path:
     info = TARGETS[target]
     print(f"\n=== 打包 {info['name']} ===", flush=True)
+    clean_old_output(info["name"])
 
     cmd = [
         sys.executable, "-m", "PyInstaller",
