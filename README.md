@@ -257,6 +257,17 @@ cp /c/Windows/Fonts/consola.ttf ./_font.ttf   # 字体得放当前目录：路�
 这一个机制同时解决了三件事：自动纠偏、状态一致、以及某台机器加载慢错过
 起播时刻的补救。
 
+**中途加入。**
+教师端只在开播那一刻广播一次 `PLAY`，所以以前学生关掉播放窗口、或者重开软件再连上，只会收到心跳，
+没有 mpv 可纠偏，表现就是「已连接教师端，但不播」。现在：
+
+- 学生端连上教师端时，如果本机没在播放，会发一条 `JOIN`；教师端正在放的话，回一条只给这台机器的
+  `PLAY`，从老师**此刻的位置**开始（按最近的心跳推算，不去问 mpv）。老师暂停着就停在暂停的位置。
+  本机 mpv 还开着时（比如只是断线重连）不发，免得无谓地重新加载、黑屏。
+- 学生自己关掉播放窗口后，窗口里会出现 **加入播放** 按钮（老师在放、本机没在放时才出现），点一下回到老师的位置。
+  不会自动弹回来：学生是自己关的，不该被强行拉回。
+- 切片课程同样可以中途加入（回复里带着 `package`），缺的切片照样从教师机/同学那里拉。
+
 **纠偏之后还落后？——seek 补偿与「校准同步」按钮。**
 seek 不是瞬间完成的：解码新位置、等切片都要时间，这段时间里教师端又往前播了。
 所以「seek 到教师此刻的位置」落地时总会落后一个 seek 延迟，而且偏差一超过 0.5 秒
@@ -311,10 +322,11 @@ python tests/test_mpv_ipc.py        # mpv IPC 封装，跑在假 mpv 上（14 �
 python tests/live_mpv.py            # 真 mpv 端到端，mkv + mp4 各一遍（29 项，弹 mpv 窗口）
 python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫描（19 项）
 python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
+python tests/test_join.py           # 中途加入：重开软件 / 关掉播放窗口后回到老师正在放的视频（20 项）
 python tests/test_calibrate.py      # 校准同步 + 自动 seek 补偿（模拟 seek 延迟的假 mpv + 真教师端，23 项）
-python tests/test_student_ui.py     # 学生端窗口按钮接线 + 切片缓存显示、校准同步按钮（53 项，offscreen，不需要显示器）
+python tests/test_student_ui.py     # 学生端窗口按钮接线 + 切片缓存显示、校准同步 / 加入播放按钮（57 项，offscreen，不需要显示器）
 python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（82 项，不需要 mpv 和 ffmpeg）
-python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表、起播提前量设置、增强轻声开关（45 项，offscreen）
+python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表、起播提前量设置、增强轻声开关、记录正在放什么（48 项，offscreen）
 python tests/live_hls.py            # 真 mpv + ffmpeg：教师机限速时 mpv 会等切片、预读有界、字幕能渲染（12 项）
 python tests/test_integration.py    # 1 教师 + 3 学生同机集成（17 项，弹 5 个窗口）
 ```

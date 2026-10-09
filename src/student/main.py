@@ -196,7 +196,8 @@ class Student:
         self._cancel_pending()
         self._pending_task = asyncio.create_task(
             self._load_and_start(
-                video, subtitle, float(message.get("position", 0.0)), float(message["start_at"])
+                video, subtitle, float(message.get("position", 0.0)), float(message["start_at"]),
+                bool(message.get("paused", False)),
             )
         )
 
@@ -214,7 +215,8 @@ class Student:
     # --------------------------------------------------------------- 同步播放
 
     async def _load_and_start(
-        self, video: Path, subtitle: Path | None, position: float, start_at: float
+        self, video: Path, subtitle: Path | None, position: float, start_at: float,
+        paused: bool = False,
     ) -> None:
         try:
             # 以暂停态加载并定位。加载 4K MKV 可能要好几秒，所以必须在
@@ -230,6 +232,10 @@ class Student:
 
         self.state.play = st.WAITING
         await self._sleep_until(start_at)
+        if paused:
+            # 中途加入时老师正好是暂停的：停在老师暂停的位置，等老师继续
+            self.state.play = st.PAUSED
+            return
         await asyncio.to_thread(self._safe, self.mpv.play)
         self.state.play = st.PLAYING
 
@@ -328,6 +334,41 @@ class Student:
             self._last_fix = (time.monotonic(), False)
         except MPVError as exc:
             log(f"纠偏失败：{exc}")
+
+    # ------------------------------------------------------------ 中途加入
+
+    def _should_join(self) -> bool:
+        """本机没有在播放、也不在加载中。"""
+        busy = self._pending_task is not None and not self._pending_task.done()
+        return not self.mpv.running and not busy
+
+    def teacher_playing(self) -> bool:
+        """教师端是不是正在放视频（心跳还新鲜）。"""
+        hb = self._hb
+        if hb is None or self.state.conn != st.CONNECTED:
+            return False
+        try:
+            return self.clock.teacher_now() - float(hb["server_time"]) < 3.0
+        except (KeyError, TypeError, ValueError):
+            return False
+
+    def can_join(self) -> bool:
+        """界面上要不要显示「加入播放」：老师在放，而本机没在放（关掉了播放窗口等）。"""
+        return self.teacher_playing() and self._should_join()
+
+    def join(self) -> None:
+        """学生点「加入播放」。可以从任何线程调用。"""
+        async def go() -> None:
+            ws = self._ws
+            if ws is None or not self._should_join():
+                return
+            log("请求加入老师正在播放的视频")
+            try:
+                await ws.send(protocol.encode({"cmd": protocol.JOIN}))
+            except Exception as exc:
+                log(f"请求加入失败：{exc}")
+
+        self._call_soon(lambda: asyncio.create_task(go()))
 
     # ------------------------------------------------------------ 校准同步
 
@@ -537,11 +578,14 @@ class Student:
         self._cancel_pending()
         self._pending_task = asyncio.create_task(
             self._load_stream_and_start(
-                package, float(message.get("position", 0.0)), float(message["start_at"])
+                package, float(message.get("position", 0.0)), float(message["start_at"]),
+                bool(message.get("paused", False)),
             )
         )
 
-    async def _load_stream_and_start(self, package: dict, position: float, start_at: float) -> None:
+    async def _load_stream_and_start(
+        self, package: dict, position: float, start_at: float, paused: bool = False
+    ) -> None:
         host = self.state.teacher_host
         try:
             manifest = await asyncio.to_thread(
@@ -586,6 +630,10 @@ class Student:
 
         self.state.play = st.WAITING
         await self._sleep_until(start_at)
+        if paused:
+            # 中途加入时老师正好是暂停的：停在老师暂停的位置，等老师继续
+            self.state.play = st.PAUSED
+            return
         await asyncio.to_thread(self._safe, self.mpv.play)
         self.state.play = st.PLAYING
 
@@ -860,8 +908,14 @@ class Student:
 
             # 重连后 tracker 的记录是空的：把我的切片服务端口和已缓存的段重新报上去
             self._ws = ws
+            self._hb = None  # 上一个教师机/上一次连接的心跳作废
             status_task = asyncio.create_task(self._status_loop(ws))
             self._send_peer_hello()
+            # 中途连上（重开软件、网络断了又连）：本机没在播就问教师端现在放的是什么，
+            # 教师端在播的话会回一条 PLAY，从老师当前的位置开始。本机 mpv 还开着就不用问，
+            # 心跳会把它拉回正确位置，重新加载只会白白黑屏。
+            if self._should_join():
+                await ws.send(protocol.encode({"cmd": protocol.JOIN}))
             for pkg_id, session in self._streams.items():
                 if session.have:
                     self.notify_have(pkg_id, *sorted(session.have))

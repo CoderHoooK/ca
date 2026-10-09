@@ -172,6 +172,20 @@ def main() -> int:
     window.refresh()
     check("播放结束后结果隐藏", window._calib_note.text() == "")
 
+    # ---- 加入播放按钮：老师在放、本机没在放
+    print("\n加入播放按钮")
+    check("老师没在放：加入按钮不显示", not window._join_btn.isVisibleTo(window))
+    student._hb = {"playing": True, "position": 5.0, "server_time": student.clock.teacher_now()}
+    student.mpv.running = False
+    window.refresh()
+    check("老师在放、本机没在放：显示加入按钮，隐藏校准按钮",
+          window._join_btn.isVisibleTo(window) and not window._calib_btn.isVisibleTo(window))
+    check("提示文字说明可以加入", "加入播放" in window._hint.text(), window._hint.text())
+    student._hb["server_time"] = student.clock.teacher_now() - 10  # 心跳过期
+    window.refresh()
+    check("老师那边的心跳断了：加入按钮消失", not window._join_btn.isVisibleTo(window))
+    student._hb = None
+
     # ---- 切片播放：当前片段来源 + 缓存分布（用真的下载会话，教师机和「同学」都是真 HTTP 服务）
     print("\n切片播放：当前片段的来源和缓存分布")
     sys.path.insert(0, str(ROOT / "tests"))

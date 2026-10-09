@@ -10,7 +10,8 @@ import json
 
 # ---- 教师端 → 学生端 ----
 
-PLAY = "PLAY"            # {video, position, start_at, package?}  package={id,title,http_port}：切片课程
+PLAY = "PLAY"            # {video, position, start_at, package?, paused?}  package={id,title,http_port}：切片课程
+#                                      paused=True：加载好定位到 position 后保持暂停（中途加入时老师正好是暂停的）
 PAUSE = "PAUSE"          # {}                        状态切换，不需要时间戳
 RESUME = "RESUME"        # {position, start_at}
 SEEK = "SEEK"            # {position, start_at, resume}
@@ -25,6 +26,7 @@ VIDEO_NOT_FOUND = "VIDEO_NOT_FOUND"  # {video}
 PEER_HELLO = "PEER_HELLO"            # {http_port}        我能给别的学生机提供切片的端口
 HAVE = "HAVE"                        # {pkg, add:[idx..]} 我又缓存好了这几段
 SOURCES = "SOURCES"                  # {req, pkg, n:[idx..]}  这几段谁有？
+JOIN = "JOIN"                        # {}                 我这边没在播，老师现在放的是什么？教师端只回给我一条 PLAY（没在播就不回）
 STATUS = "STATUS"                    # {name, play, stream, have, total, from_teacher, from_peers, buffering}
 #                                      学生机的当前状态，教师端的「学生机列表」用；每秒左右报一次
 

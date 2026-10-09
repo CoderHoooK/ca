@@ -295,6 +295,12 @@ class StudentWindow(QWidget):
         self._calib_note = QLabel("")
         self._calib_note.setObjectName("hint")
         self._calib_note.setWordWrap(True)
+        # 加入播放：老师在放、本机没在放（比如自己关掉了播放窗口）时才出现
+        self._join_btn = QPushButton("加入播放")
+        self._join_btn.setToolTip("老师正在播放，点一下就从老师现在的位置开始看。")
+        self._join_btn.clicked.connect(self.student.join)
+        self._join_btn.setVisible(False)
+        calib_row.addWidget(self._join_btn)
         calib_row.addWidget(self._calib_btn)
         calib_row.addWidget(self._calib_note, 1)
         root.addLayout(calib_row)
@@ -444,7 +450,10 @@ class StudentWindow(QWidget):
         hint = ""
         if s.conn == st.CONNECTED:
             self._set_banner(f"●  已连接教师端  {where}", GREEN)
-            hint = "不用操作，等老师开始播放即可。"
+            hint = (
+                "老师正在播放，点下面的「加入播放」就能从老师现在的位置跟上。"
+                if self.student.can_join() else "不用操作，等老师开始播放即可。"
+            )
         elif s.conn == st.CONNECTING:
             self._set_banner(f"●  正在连接 {s.teacher_host} …", AMBER)
         elif s.pinned:
@@ -498,6 +507,9 @@ class StudentWindow(QWidget):
             f"color: {RED}; font-weight: bold;" if play in (st.NOT_FOUND, st.ERROR) else ""
         )
         showing = play in (st.PLAYING, st.PAUSED)
+        can_join = self.student.can_join()
+        self._join_btn.setVisible(can_join)
+        self._calib_btn.setVisible(not can_join)
         self._pos_label.setText(format_time(s.teacher_position) if showing else "—")
 
         self._calib_btn.setEnabled(showing and s.conn == st.CONNECTED and not s.calibrating)

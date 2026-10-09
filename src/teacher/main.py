@@ -86,6 +86,9 @@ class Server(threading.Thread):
         self._lock = threading.Lock()
         self._loop: asyncio.AbstractEventLoop | None = None
         self._on_message = on_message
+        # 中途加入：学生重开软件/关了播放窗口想回来时，要告诉它现在放的是什么、放到哪了
+        self._now_playing: dict | None = None   # 最近一次 PLAY 的 {video, package?}，不含时间
+        self._last_hb: dict | None = None       # 最近一次心跳（位置 + 是否在播）
         self.ready = threading.Event()
 
     def run(self) -> None:
@@ -140,6 +143,12 @@ class Server(threading.Thread):
                 cmd = message.get("cmd")
                 if cmd == protocol.STATUS:
                     self._student_status(ws, message)
+                    continue
+                if cmd == protocol.JOIN:
+                    reply = self.join_message()
+                    log(f"学生机 {peer} 请求加入播放：{'已回 PLAY' if reply else '现在没有在播放'}")
+                    if reply is not None:
+                        await ws.send(protocol.encode(reply))
                     continue
                 if cmd == protocol.PEER_HELLO:
                     self._peer_hello(ws, peer, message)
@@ -256,8 +265,39 @@ class Server(threading.Thread):
         with self._lock:
             return len(self._clients)
 
+    def set_now_playing(self, payload: dict | None) -> None:
+        """Qt 线程在开播/停止时调用。payload 形如 {"video": ..., "package": {...}}，None 表示没在播。"""
+        with self._lock:
+            self._now_playing = dict(payload) if payload else None
+            if payload is None:
+                self._last_hb = None
+
+    def join_message(self) -> dict | None:
+        """给中途加入的学生机的 PLAY：从老师此刻的位置开始。没在播放就返回 None。
+
+        位置按最近一次心跳推算，不去问 mpv（这里是网络线程，别和 Qt 线程抢 mpv）。
+        """
+        with self._lock:
+            playing, hb = self._now_playing, self._last_hb
+        if playing is None or hb is None:
+            return None
+        now = time.time()
+        if now - float(hb["server_time"]) > 3.0:
+            return None  # 心跳断了，说明老师那边已经没在放了
+        start_at = now + config.PLAY_LEAD
+        position = float(hb["position"])
+        if hb.get("playing"):
+            position += start_at - float(hb["server_time"])
+        return dict(
+            playing, cmd=protocol.PLAY, position=max(0.0, position), start_at=start_at,
+            paused=not hb.get("playing"),
+        )
+
     def broadcast(self, message: dict) -> None:
         """从 Qt 主线程调用。"""
+        if message.get("cmd") == protocol.HEARTBEAT:
+            with self._lock:
+                self._last_hb = dict(message)
         if self._loop is None:
             return
         payload = protocol.encode(message)
@@ -437,6 +477,7 @@ class Window(QWidget):
         """
         running = self.mpv.running
         if self._mpv_was_running and not running:
+            self.server.set_now_playing(None)
             self.server.broadcast({"cmd": protocol.STOP})
             self._slider.setValue(0)
             self._time_label.setText("--:-- / --:--")
@@ -537,17 +578,16 @@ class Window(QWidget):
         lead = float(self._lead_spin.value())
         start_at = self._start_at_after(lead)
         self._run_at(start_at, self.mpv.play)
+        package = {"id": manifest.id, "title": manifest.title, "http_port": http.port}
+        video_name = manifest.source_name or manifest.title
+        self.server.set_now_playing({"video": video_name, "package": package})
         self.server.broadcast(
             {
                 "cmd": protocol.PLAY,
-                "video": manifest.source_name or manifest.title,
+                "video": video_name,
                 "position": 0.0,
                 "start_at": start_at,
-                "package": {
-                    "id": manifest.id,
-                    "title": manifest.title,
-                    "http_port": http.port,
-                },
+                "package": package,
             }
         )
         log(f"广播 PLAY 切片课程《{manifest.title}》，{lead:g}s 后起播")
@@ -597,6 +637,7 @@ class Window(QWidget):
 
         start_at = self._start_at_after(config.PLAY_LEAD)
         self._run_at(start_at, self.mpv.play)  # 教师机自己也在 start_at 起播
+        self.server.set_now_playing({"video": self.video.name})
         self.server.broadcast(
             {
                 "cmd": protocol.PLAY,
@@ -664,6 +705,7 @@ class Window(QWidget):
     def _stop(self) -> None:
         if not self.mpv.running:
             return
+        self.server.set_now_playing(None)
         self.server.broadcast({"cmd": protocol.STOP})
         self.mpv.stop()
         self._mpv_was_running = False

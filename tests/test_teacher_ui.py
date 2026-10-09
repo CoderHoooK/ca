@@ -193,12 +193,20 @@ def main() -> int:
             window.package = (folder, manifest)
             window._play()
             check("开播后自动应用（切片课程）", window.mpv.boost == [True], str(window.mpv.boost))
+            now = window.server._now_playing
+            check("开播后记下「正在放什么」（给中途加入的学生）",
+                  now is not None and now.get("package", {}).get("id") == manifest.id, str(now))
             window.mpv.boost = []
             window.package = None
             window.video = tmp / "普通.mkv"
             window.video.write_bytes(b"x")
             window._play()
             check("开播后自动应用（本地视频）", window.mpv.boost == [True], str(window.mpv.boost))
+            check("本地视频：记下视频名，没有 package", window.server._now_playing == {"video": "普通.mkv"},
+                  str(window.server._now_playing))
+            window.mpv.running = True
+            window._stop()
+            check("停止后清掉「正在放什么」", window.server._now_playing is None)
             window._boost_check.setChecked(False)
             window.mpv.running = False
             window.package = (folder, manifest)
