@@ -109,8 +109,8 @@ AV1 / VP9 要先转码）。音轨不能直接装进 TS 的（如 FLAC）会自�
 
 把整个课程文件夹拷到教师机 `Teacher.exe` 旁边的 **`课程库\`** 目录。教师端点
 **选择切片课程**，列表里选一门，再点 **▶ 同步播放**。学生机桌面上有同名视频的
-照常用本地的，没有的自动开始拉切片，起播提前量是 10 秒（`STREAM_PLAY_LEAD`），
-给学生机缓冲第一批切片。
+照常用本地的，没有的自动开始拉切片，起播提前量默认 20 秒，给学生机缓冲第一批切片。
+教师端窗口里有个 **切片起播提前量**（5–120 秒），学生多、教师机带宽小就调大，改了自动记住，不用重新打包。
 
 ### 3. 它是怎么分发的
 
@@ -290,7 +290,7 @@ python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫
 python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
 python tests/test_student_ui.py     # 学生端窗口按钮接线 + 切片缓存显示（45 项，offscreen，不需要显示器）
 python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（82 项，不需要 mpv 和 ffmpeg）
-python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表（34 项，offscreen）
+python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表、起播提前量设置（38 项，offscreen）
 python tests/live_hls.py            # 真 mpv + ffmpeg：教师机限速时 mpv 会等切片、预读有界、字幕能渲染（12 项）
 python tests/test_integration.py    # 1 教师 + 3 学生同机集成（17 项，弹 5 个窗口）
 ```

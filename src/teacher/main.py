@@ -26,7 +26,7 @@ from pathlib import Path
 # 允许直接 `python src/teacher/main.py` 运行
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from PySide6.QtCore import Qt, QTimer
+from PySide6.QtCore import QSettings, Qt, QTimer
 from PySide6.QtWidgets import (
     QApplication,
     QFileDialog,
@@ -35,6 +35,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QPushButton,
     QSlider,
+    QSpinBox,
     QVBoxLayout,
     QWidget,
 )
@@ -344,6 +345,29 @@ class Window(QWidget):
             buttons.addWidget(button)
         layout.addLayout(buttons)
 
+        # 切片起播提前量：学生机要先拉到第一批切片才能开播，人多/带宽紧就调大。改了自动记住。
+        self._settings = QSettings(QSettings.IniFormat, QSettings.UserScope, "LanVideoSync", "Teacher")
+        lo, hi = config.STREAM_PLAY_LEAD_RANGE
+        saved = self._settings.value("stream_play_lead", config.STREAM_PLAY_LEAD, type=float)
+        self._lead_spin = QSpinBox()
+        self._lead_spin.setRange(lo, hi)
+        self._lead_spin.setSingleStep(5)
+        self._lead_spin.setSuffix(" 秒")
+        self._lead_spin.setValue(int(min(max(saved, lo), hi)))
+        self._lead_spin.setToolTip(
+            "点「同步播放」后，等多少秒全班一起开始（只对切片课程有用）。\n"
+            "学生多、教师机带宽小，就调大一点，让学生机有时间缓冲好第一批切片。"
+        )
+        self._lead_spin.valueChanged.connect(
+            lambda v: self._settings.setValue("stream_play_lead", float(v))
+        )
+        lead_row = QHBoxLayout()
+        lead_row.addWidget(QLabel("切片起播提前量"))
+        lead_row.addWidget(self._lead_spin)
+        lead_row.addWidget(QLabel("（学生多、带宽紧就调大）"))
+        lead_row.addStretch(1)
+        layout.addLayout(lead_row)
+
         layout.addWidget(self._clients_label)
         self._roster = Roster()
         layout.addWidget(self._roster, 1)
@@ -485,7 +509,8 @@ class Window(QWidget):
             self._missing.clear()
 
         # 学生机要先把第一段拉下来才能开播，提前量比本地播放长
-        start_at = self._start_at_after(config.STREAM_PLAY_LEAD)
+        lead = float(self._lead_spin.value())
+        start_at = self._start_at_after(lead)
         self._run_at(start_at, self.mpv.play)
         self.server.broadcast(
             {
@@ -500,7 +525,7 @@ class Window(QWidget):
                 },
             }
         )
-        log(f"广播 PLAY 切片课程《{manifest.title}》，{config.STREAM_PLAY_LEAD:g}s 后起播")
+        log(f"广播 PLAY 切片课程《{manifest.title}》，{lead:g}s 后起播")
 
     @staticmethod
     def _start_at_after(seconds: float) -> float:

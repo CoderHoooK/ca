@@ -17,6 +17,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 sys.path.insert(0, str(ROOT / "tests"))
 
+from PySide6.QtCore import QSettings
 from PySide6.QtWidgets import QApplication
 
 from common import config, protocol
@@ -81,6 +82,8 @@ def main() -> int:
         check("课程库目录不存在时自动建好", (tmp / "新的空课程库").is_dir())
 
         print("\n播放切片课程")
+        # 设置文件指到临时目录，别读写真的
+        QSettings.setPath(QSettings.IniFormat, QSettings.UserScope, str(tmp / "settings"))
         window = teacher_main.Window()
         window.mpv = FakeMPV()
         sent: list[dict] = []
@@ -102,7 +105,23 @@ def main() -> int:
             check("PLAY 带课程信息", msg["package"] == {"id": manifest.id, "title": "课A", "http_port": port}, str(msg.get("package")))
             check("video 字段是原始文件名（学生桌面有同名就用本地的）", msg["video"] == manifest.source_name)
             lead = msg["start_at"] - t0
-            check("起播提前量比本地播放长", config.STREAM_PLAY_LEAD - 1 < lead < config.STREAM_PLAY_LEAD + 3, f"{lead:.1f}s")
+            check("起播提前量默认是配置里的值", window._lead_spin.value() == int(config.STREAM_PLAY_LEAD)
+                  and config.STREAM_PLAY_LEAD - 1 < lead < config.STREAM_PLAY_LEAD + 3, f"{lead:.1f}s")
+            # 界面里改成 35 秒：下一次播放就按 35 秒，并且记住
+            window._lead_spin.setValue(35)
+            sent.clear()
+            t1 = time.time()
+            window._play()
+            lead2 = sent[0]["start_at"] - t1
+            check("在界面里改提前量后，下一次播放按新的值", 34 < lead2 < 38, f"{lead2:.1f}s")
+            check("改的值被记住", QSettings(QSettings.IniFormat, QSettings.UserScope, "LanVideoSync", "Teacher")
+                  .value("stream_play_lead", type=float) == 35.0)
+            lo, hi = config.STREAM_PLAY_LEAD_RANGE
+            window._lead_spin.setValue(10_000)
+            check("提前量有上限", window._lead_spin.value() == hi)
+            window._lead_spin.setValue(0)
+            check("提前量有下限", window._lead_spin.value() == lo)
+            window._lead_spin.setValue(int(config.STREAM_PLAY_LEAD))
             code, _ = http(f"http://127.0.0.1:{port}/p/{manifest.id}/manifest.json")
             check("学生能从教师机的服务取到 manifest", code == 200)
             code, body = http(f"http://127.0.0.1:{port}/p/{manifest.id}/seg_00000.ts")
