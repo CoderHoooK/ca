@@ -53,6 +53,11 @@ class StudentState:
     has_subtitle: bool = False
     teacher_position: float | None = None   # 教师端心跳里的位置（秒）
 
+    # ---- 校准同步（学生点按钮）----
+    calibrating: bool = False
+    calib_note: str = ""         # 最近一次校准的结果，给学生看
+    calib_ok: bool | None = None  # None=还没校准过；True=已对齐；False=尽力了仍有偏差
+
     # ---- 切片播放（桌面上没有视频时，从教师机/同学那里拉）----
     stream: bool = False         # 当前视频是不是靠切片播的
     stream_have: int = 0         # 已缓存的段数

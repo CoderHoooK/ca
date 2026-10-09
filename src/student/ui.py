@@ -283,6 +283,22 @@ class StudentWindow(QWidget):
         grid.setColumnStretch(1, 1)
         root.addWidget(play_card)
 
+        # 校准同步：觉得画面比老师慢（或快）了，点一下自动对齐
+        calib_row = QHBoxLayout()
+        self._calib_btn = QPushButton("校准同步")
+        self._calib_btn.setToolTip(
+            "觉得画面和老师不同步时点一下：\n"
+            "重新和教师机对时钟，立刻跳到老师当前的位置，再检查还差多少、自动补上。\n"
+            "需要老师正在播放。"
+        )
+        self._calib_btn.clicked.connect(self.student.calibrate)
+        self._calib_note = QLabel("")
+        self._calib_note.setObjectName("hint")
+        self._calib_note.setWordWrap(True)
+        calib_row.addWidget(self._calib_btn)
+        calib_row.addWidget(self._calib_note, 1)
+        root.addLayout(calib_row)
+
         self._env_label = QLabel("")
         self._env_label.setObjectName("hint")
         self._env_label.setWordWrap(True)
@@ -483,6 +499,12 @@ class StudentWindow(QWidget):
         )
         showing = play in (st.PLAYING, st.PAUSED)
         self._pos_label.setText(format_time(s.teacher_position) if showing else "—")
+
+        self._calib_btn.setEnabled(showing and s.conn == st.CONNECTED and not s.calibrating)
+        self._calib_btn.setText("校准中…" if s.calibrating else "校准同步")
+        self._calib_note.setText(s.calib_note if (showing or s.calibrating) else "")
+        color = {True: GREEN, False: RED}.get(s.calib_ok, "") if not s.calibrating else ""
+        self._calib_note.setStyleSheet(f"color: {color};" if color else "")
 
         streaming = bool(s.stream and s.stream_total)
         info = self.student.stream_info() if streaming else None

@@ -47,6 +47,9 @@ from student.streaming import StreamSession
 
 _instance_counter = itertools.count(1)
 
+# 纠偏 seek 之后等这么久再评价效果（秒）
+FIX_SETTLE = 2.0
+
 
 class Student:
     def __init__(self, cache_dir: Path | None = None) -> None:
@@ -81,6 +84,17 @@ class Student:
         self._req_ids = itertools.count(1)
         self._wait_lock = threading.Lock()
         self._waiting_requests = 0
+
+        # ---- 校准同步 ----
+        self._hb: dict | None = None          # 最近一次教师端心跳
+        self._calibrating = False             # 校准期间心跳纠偏让路
+        self._calib_task: asyncio.Task | None = None
+        self._pong_q: asyncio.Queue | None = None
+        # seek 补偿（秒）：seek 完成要花时间（解码、等切片），这段时间教师端又往前播了，
+        # 所以 seek 的目标要比「此刻教师位置」多跳一点。校准时测出来，之后纠偏也用它。
+        self._seek_lead = 0.0
+        # 纠偏 seek 之后要等一会儿再评价效果：（seek 时刻 monotonic, 是否已评价）
+        self._last_fix: tuple[float, bool] | None = None
 
     # ------------------------------------------------------------- 本地视频
 
@@ -136,11 +150,16 @@ class Student:
             self.state.play = st.IDLE
             self.state.video = ""
             self.state.teacher_position = None
+        elif cmd == protocol.PONG:
+            if self._pong_q is not None:  # 校准时重新对时
+                self._pong_q.put_nowait((time.time(), message))
         elif cmd == protocol.HEARTBEAT:
+            self._hb = message
             self.state.teacher_position = _to_float(message.get("position"))
             await asyncio.to_thread(self._on_heartbeat, message)
 
     async def _on_play(self, message: dict, ws) -> None:
+        self.state.calib_note, self.state.calib_ok = "", None  # 换了视频，上次的校准结果作废
         name = message.get("video", "")
         videos = self.find_videos()
         self.state.desktop_videos = len(videos)
@@ -244,6 +263,11 @@ class Student:
 
     # ----------------------------------------------------------------- 纠偏
 
+    def _expected(self, message: dict, at: float | None = None) -> float:
+        """按一条心跳，推算教师端在 at（本机时间，默认此刻）应该播到哪。"""
+        now = time.time() if at is None else at
+        return float(message["position"]) + (now + self.clock.offset - float(message["server_time"]))
+
     def _on_heartbeat(self, message: dict) -> None:
         """按教师端的心跳到正确位置。
 
@@ -251,13 +275,12 @@ class Student:
         应该在 position + 已经过去的时间。偏差小于阈值就不动——
         频繁 seek 会让画面一直抽搐，比轻微不同步更难看。
         """
-        elapsed = self.clock.teacher_now() - float(message["server_time"])
-        target = float(message["position"]) + elapsed
-
         # 切片模式：预缓存窗口跟着教师的位置走（暂停时也跟，位置不会动而已）
         if self._stream is not None:
-            self._stream.set_focus_time(target)
+            self._stream.set_focus_time(self._expected(message))
 
+        if self._calibrating:
+            return  # 学生正在点「校准同步」，由校准流程管 mpv
         if self._pending_task is not None and not self._pending_task.done():
             return  # 正在执行 PLAY/SEEK 的等待，别和它抢 mpv
         if not self.mpv.running or self.mpv.query_paused():
@@ -269,19 +292,235 @@ class Student:
             # 重新发请求、白白堆积；等货到了、画面动起来再纠偏。
             return
 
+        # 读位置要花时间（IPC 一来一回，卡的时候最多 0.4 秒）：拿「读位置的中点」
+        # 去算教师此刻的位置，而不是读之前就算好的 target，否则会系统性地误判成超前
+        t_before = time.time()
         current = self.mpv.get_position()
+        t_after = time.time()
         if current is None:
             return
 
-        drift = current - target
+        drift = current - self._expected(message, (t_before + t_after) / 2.0)
+
+        # 上一次纠偏 seek 的善后。seek 要花时间才真正动起来，这段时间里位置停着、
+        # 偏差看起来越来越大——如果这时又 seek，就会每秒 seek 一次、画面一直抽搐还总是落后。
+        # 所以：seek 之后先等 SETTLE 秒不评价；等稳了再看还差多少，差的部分记进补偿量，
+        # 下次 seek 就会多跳一点（自动学习，不用学生操作；「校准同步」按钮是手动加速这个过程）。
+        if self._last_fix is not None:
+            fixed_at, judged = self._last_fix
+            age = time.monotonic() - fixed_at
+            if age < FIX_SETTLE:
+                return
+            if not judged:
+                self._last_fix = (fixed_at, True)
+                if abs(drift) >= 0.15 and age < FIX_SETTLE + 6.0:
+                    lo, hi = config.SEEK_LEAD_RANGE
+                    self._seek_lead = min(hi, max(lo, self._seek_lead - drift * 0.8))
+                    log(f"纠偏之后还差 {drift:+.2f}s，seek 补偿调为 {self._seek_lead:+.2f}s")
+
         if abs(drift) < config.DRIFT_THRESHOLD:
             return
 
-        log(f"偏差 {drift:+.2f}s，纠偏到 {target:.2f}s")
+        target = self._expected(message) + self._seek_lead
+        log(f"偏差 {drift:+.2f}s，纠偏到 {target:.2f}s（补偿 {self._seek_lead:+.2f}s）")
         try:
             self.mpv.seek(target)
+            self._last_fix = (time.monotonic(), False)
         except MPVError as exc:
             log(f"纠偏失败：{exc}")
+
+    # ------------------------------------------------------------ 校准同步
+
+    def calibrate(self) -> None:
+        """学生点「校准同步」。可以从任何线程调用。
+
+        做三件事：① 重新和教师机对一次时钟 ② 立刻跳到教师当前位置
+        ③ 看跳完之后还差多少，差就补上再跳，最多几轮。
+        测出的 seek 补偿会留着，之后自动纠偏也用它。
+        """
+        def start() -> None:
+            if self._calib_task is None or self._calib_task.done():
+                self._calib_task = asyncio.create_task(self._calibrate())
+
+        self._call_soon(start)
+
+    def _calib_result(self, note: str, ok: bool | None) -> None:
+        log(f"校准：{note}")
+        self.state.calib_note, self.state.calib_ok = note, ok
+
+    async def _calibrate(self) -> None:
+        s = self.state
+        if self._ws is None or s.conn != st.CONNECTED:
+            self._calib_result("没连上教师机，没法校准", False)
+            return
+        if not self.mpv.running or s.play not in (st.PLAYING, st.PAUSED):
+            self._calib_result("还没有在播放，开始播放后再点", False)
+            return
+        if self._pending_task is not None and not self._pending_task.done():
+            self._calib_result("正在加载/等待起播，稍后再点", False)
+            return
+
+        self._calibrating = True
+        s.calibrating = True
+        s.calib_note = "校准中…"
+        started = time.monotonic()
+        try:
+            await self._do_calibrate(started)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            log("校准出错：\n" + traceback.format_exc())
+            self._calib_result(f"校准没有成功（{exc}）", False)
+        finally:
+            self._calibrating = False
+            s.calibrating = False
+
+    async def _remeasure_clock(self, samples: int = 7) -> bool:
+        """重新做一次 PING/PONG 对时。时钟会慢慢走偏，开机时对的，上完一节课可能就差几十毫秒了。"""
+        ws = self._ws
+        if ws is None:
+            return False
+        queue: asyncio.Queue = asyncio.Queue()
+        self._pong_q = queue
+        best: tuple[float, float] | None = None  # (rtt, offset)
+        try:
+            for _ in range(samples):
+                t0 = time.time()
+                await ws.send(protocol.encode({"cmd": protocol.PING, "t0": t0}))
+                try:
+                    while True:
+                        t1, reply = await asyncio.wait_for(queue.get(), timeout=1.0)
+                        if reply.get("t0") == t0:
+                            break
+                except asyncio.TimeoutError:
+                    continue
+                rtt = t1 - t0
+                offset = float(reply["t_teacher"]) - (t0 + t1) / 2.0
+                if best is None or rtt < best[0]:
+                    best = (rtt, offset)
+        finally:
+            self._pong_q = None
+        if best is None:
+            return False
+        old = self.clock.offset
+        self.clock.rtt, self.clock.offset = best
+        self.state.rtt, self.state.offset = best
+        log(f"重新对时：RTT {best[0] * 1000:.1f}ms，时钟偏差 {best[1]:+.3f}s（之前 {old:+.3f}s）")
+        return True
+
+    async def _wait_not_buffering(self, timeout: float) -> bool:
+        deadline = time.monotonic() + timeout
+        while self.state.buffering and time.monotonic() < deadline:
+            await asyncio.sleep(0.2)
+        return not self.state.buffering
+
+    async def _measure_drift(self, samples: int = 3, gap: float = 0.25) -> float | None:
+        """测当前比教师端超前（正）还是落后（负）多少秒，取中位数抗抖动。"""
+        values: list[float] = []
+        for i in range(samples):
+            hb = self._hb
+            if hb is not None:
+                t_before = time.time()
+                pos = await asyncio.to_thread(self.mpv.get_position)
+                t_after = time.time()
+                if pos is not None:
+                    values.append(pos - self._expected(hb, (t_before + t_after) / 2.0))
+            if i < samples - 1:
+                await asyncio.sleep(gap)
+        if not values:
+            return None
+        values.sort()
+        return values[len(values) // 2]
+
+    async def _settle_playing(self, timeout: float = 12.0) -> bool:
+        """seek 之后等画面真的动起来（不在缓冲、位置在前进），再去测偏差。"""
+        deadline = time.monotonic() + timeout
+        await asyncio.sleep(0.5)
+        last = await asyncio.to_thread(self.mpv.get_position)
+        while time.monotonic() < deadline:
+            await asyncio.sleep(0.4)
+            if self.state.buffering:
+                continue
+            now = await asyncio.to_thread(self.mpv.get_position)
+            if last is not None and now is not None and now - last > 0.2:
+                return True
+            last = now
+        return False
+
+    async def _do_calibrate(self, started: float) -> None:
+        lo, hi = config.SEEK_LEAD_RANGE
+        tolerance = config.CALIBRATE_TOLERANCE
+
+        # ① 对时
+        timed = await self._remeasure_clock()
+
+        # 教师端的位置信息：太旧说明教师端没在播
+        hb = self._hb
+        if hb is None or self.clock.teacher_now() - float(hb["server_time"]) > 3.0:
+            self._calib_result("没有收到教师端的播放位置（老师是不是没在播？）", False)
+            return
+
+        # 教师端暂停：位置不动，直接对齐到那个位置，学生也停着
+        if not hb.get("playing"):
+            await asyncio.to_thread(self._safe, self.mpv.pause)
+            self.state.play = st.PAUSED
+            await asyncio.to_thread(self._safe, self.mpv.seek, float(hb["position"]))
+            self._calib_result(
+                f"老师当前是暂停的，已对齐到 {float(hb['position']):.1f} 秒（继续播放后可再点一次）", True
+            )
+            return
+
+        # ② ③ seek → 测偏差 → 补偿 → 再 seek
+        drift: float | None = None
+        for round_no in range(1, config.CALIBRATE_ROUNDS + 1):
+            if not self.mpv.running:
+                self._calib_result("播放窗口被关掉了，没法校准", False)
+                return
+            if self._pending_task is not None and not self._pending_task.done():
+                self._calib_result("老师刚切换了播放，稍后再点", False)
+                return
+            if not await self._wait_not_buffering(20.0):
+                self._calib_result(
+                    "画面一直在缓冲，是网络/切片没跟上，不是同步问题；缓冲完再点一次", False
+                )
+                return
+
+            hb = self._hb
+            if self._stream is not None:
+                # 切片模式：先把目标位置那一段拉到再 seek，不然 mpv 在新位置上干等
+                guess = self._expected(hb) + self._seek_lead + 1.0
+                self._stream.set_focus_time(guess, urgent=True)
+                await asyncio.to_thread(self._stream.wait_ready, guess, 1, 10.0)
+                hb = self._hb
+            target = self._expected(hb) + self._seek_lead
+            await asyncio.to_thread(self._safe, self.mpv.seek, target)
+            self._last_fix = None  # 校准自己会评价，别和心跳里的自动学习重复
+            self.state.play = st.PLAYING
+
+            if not await self._settle_playing():
+                self._calib_result("跳转之后画面没有动起来，请稍后再点一次", False)
+                return
+            drift = await self._measure_drift()
+            if drift is None:
+                self._calib_result("读不到播放位置，请稍后再点一次", False)
+                return
+            log(f"校准第 {round_no} 轮：补偿 {self._seek_lead:+.2f}s，跳转后偏差 {drift:+.2f}s")
+            if abs(drift) <= tolerance:
+                break
+            # 落后（drift<0）就多跳一点，超前就少跳一点
+            self._seek_lead = min(hi, max(lo, self._seek_lead - drift))
+
+        used = time.monotonic() - started
+        clock_note = "" if timed else "（对时没成功，沿用上次的时钟）"
+        if drift is not None and abs(drift) <= tolerance:
+            self._calib_result(f"已校准，和老师相差 {abs(drift):.2f} 秒以内{clock_note}（用时 {used:.0f} 秒）", True)
+        else:
+            way = "落后" if (drift or 0) < 0 else "超前"
+            self._calib_result(
+                f"已尽力校准，仍{way}约 {abs(drift or 0):.2f} 秒；"
+                f"可能是这台电脑太卡或网络不稳{clock_note}",
+                False,
+            )
 
     # ------------------------------------------------------------ 切片播放
 

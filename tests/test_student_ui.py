@@ -141,6 +141,37 @@ def main() -> int:
     window.refresh()
     check("播放结束后缓存一行隐藏", not window._cache_label.isVisibleTo(window))
 
+    # ---- 校准同步按钮
+    print("\n校准同步按钮")
+    pump_until(app, lambda: student.state.conn == st.CONNECTED, 10)
+    window.refresh()
+    check("没在播放：按钮灰着", not window._calib_btn.isEnabled())
+    sstate.video, sstate.play = "课程", st.PLAYING
+    student.mpv.running = True
+    sstate.calib_note, sstate.calib_ok, sstate.calibrating = "", None, False
+    window.refresh()
+    check("播放中：按钮可点", window._calib_btn.isEnabled() and window._calib_btn.text() == "校准同步", f"conn={sstate.conn}")
+    sstate.calibrating, sstate.calib_note = True, "校准中…"
+    window.refresh()
+    check("校准中：按钮灰着并显示校准中", not window._calib_btn.isEnabled() and "校准中" in window._calib_btn.text())
+    sstate.calibrating, sstate.calib_note, sstate.calib_ok = False, "已校准，和老师相差 0.03 秒以内", True
+    window.refresh()
+    check("校准完显示结果", "已校准" in window._calib_note.text() and window._calib_btn.isEnabled())
+    check("成功结果是绿色", "2e9e5b" in window._calib_note.styleSheet(), window._calib_note.styleSheet())
+    sstate.calib_ok, sstate.calib_note = False, "已尽力校准，仍落后约 0.50 秒"
+    window.refresh()
+    check("没对齐的结果是红色", "d64545" in window._calib_note.styleSheet())
+    # 真的点一下：按钮 → Student.calibrate → 事件循环里跑 _calibrate（没有教师心跳，应该如实回报）
+    sstate.calib_note, sstate.calib_ok = "", None
+    window._calib_btn.click()
+    pump_until(app, lambda: bool(sstate.calib_note), 5)
+    window.refresh()
+    check("点按钮真的会触发校准并把结果显示出来", bool(window._calib_note.text()), window._calib_note.text())
+    sstate.video, sstate.play, sstate.calib_note, sstate.calib_ok = "", st.IDLE, "", None
+    student.mpv.running = False
+    window.refresh()
+    check("播放结束后结果隐藏", window._calib_note.text() == "")
+
     # ---- 切片播放：当前片段来源 + 缓存分布（用真的下载会话，教师机和「同学」都是真 HTTP 服务）
     print("\n切片播放：当前片段的来源和缓存分布")
     sys.path.insert(0, str(ROOT / "tests"))

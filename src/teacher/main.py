@@ -693,7 +693,11 @@ class Window(QWidget):
         """
         if not self.mpv.running:
             return
+        # 时间戳取「问位置」这一来一回的中点：问 mpv 要花几毫秒到几十毫秒，
+        # 位置是在这段时间中间读到的，盖「发送时刻」的章会让学生端系统性地多算一点
+        t_before = time.time()
         position = self.mpv.get_position()
+        t_after = time.time()
         if position is None:
             return
 
@@ -702,7 +706,7 @@ class Window(QWidget):
                 "cmd": protocol.HEARTBEAT,
                 "playing": not self.mpv.query_paused(),
                 "position": position,
-                "server_time": time.time(),
+                "server_time": (t_before + t_after) / 2.0,
             }
         )
 

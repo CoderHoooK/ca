@@ -257,6 +257,19 @@ cp /c/Windows/Fonts/consola.ttf ./_font.ttf   # 字体得放当前目录：路�
 这一个机制同时解决了三件事：自动纠偏、状态一致、以及某台机器加载慢错过
 起播时刻的补救。
 
+**纠偏之后还落后？——seek 补偿与「校准同步」按钮。**
+seek 不是瞬间完成的：解码新位置、等切片都要时间，这段时间里教师端又往前播了。
+所以「seek 到教师此刻的位置」落地时总会落后一个 seek 延迟，而且偏差一超过 0.5 秒
+就又 seek 一次，画面一直抽搐还总是落后。现在的处理：
+
+- seek 之后先等 2 秒不评价；稳了再看还差多少，差的部分记成 **seek 补偿**，
+  下次 seek 就多跳一点（自动学习，学生不用操作，上限见 `config.SEEK_LEAD_RANGE`）。
+- 学生端窗口有个 **校准同步** 按钮：觉得画面比老师慢了点一下，会 ① 重新和教师机对一次时钟
+  （时钟会慢慢走偏）② 立刻跳到老师当前位置 ③ 看跳完还差多少，自动补上再跳，最多 3 轮，
+  偏差 ≤ 0.12 秒算对齐。结果显示在按钮旁边；对不齐时会说明原因（正在缓冲 / 电脑太卡 / 没收到教师位置）。
+- 老师暂停时点校准：对齐到暂停的位置并保持暂停。
+- 教师端心跳的时间戳取「读位置」那一来一回的中点，学生端读位置也一样，去掉两头各自的系统误差。
+
 **3. 时钟对齐用 NTP 那套。**
 学生端连上后发几个 PING/PONG 算出和教师端的时钟偏差（取往返最快的那次采样），
 之后所有时间都换算到教师时钟再比。不这么做的话，各机器系统时间差几秒就全乱了。
@@ -298,7 +311,8 @@ python tests/test_mpv_ipc.py        # mpv IPC 封装，跑在假 mpv 上（14 �
 python tests/live_mpv.py            # 真 mpv 端到端，mkv + mp4 各一遍（29 项，弹 mpv 窗口）
 python tests/smoke.py               # 发现 / 时钟同步 / 纠偏 / 后缀扫描（19 项）
 python tests/test_scan.py           # 教师机扫描 + 学生端连接状态机（44 项，不需要 mpv）
-python tests/test_student_ui.py     # 学生端窗口按钮接线 + 切片缓存显示（45 项，offscreen，不需要显示器）
+python tests/test_calibrate.py      # 校准同步 + 自动 seek 补偿（模拟 seek 延迟的假 mpv + 真教师端，23 项）
+python tests/test_student_ui.py     # 学生端窗口按钮接线 + 切片缓存显示、校准同步按钮（53 项，offscreen，不需要显示器）
 python tests/test_streaming.py      # 切片服务 / 下载器 / P2P / tracker / 校验（82 项，不需要 mpv 和 ffmpeg）
 python tests/test_teacher_ui.py     # 教师端选课程、播放切片课程、学生机列表、起播提前量设置、增强轻声开关（45 项，offscreen）
 python tests/live_hls.py            # 真 mpv + ffmpeg：教师机限速时 mpv 会等切片、预读有界、字幕能渲染（12 项）

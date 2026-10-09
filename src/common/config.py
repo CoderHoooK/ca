@@ -24,6 +24,14 @@ DRIFT_THRESHOLD = 0.5
 # 教师端心跳间隔，学生端靠它自己纠偏
 HEARTBEAT_INTERVAL = 1.0
 
+# ---- 学生端「校准同步」按钮 ----
+# 校准后偏差在这个秒数以内就算对齐了（人眼耳基本察觉不到）
+CALIBRATE_TOLERANCE = 0.12
+# 最多 seek 几轮。每轮测出 seek 之后还落后/超前多少，下一轮补上
+CALIBRATE_ROUNDS = 3
+# seek 补偿量（秒）的上下限：seek 完成要花时间，期间教师端又往前播了，所以要往前多跳一点
+SEEK_LEAD_RANGE = (-1.0, 5.0)
+
 # 学生端找不到教师端时的重试间隔
 REDISCOVER_INTERVAL = 2.0
 
